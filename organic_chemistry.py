@@ -1,356 +1,375 @@
-# import json
+﻿"""
+有机化学核心数据结构（半显式原子模型）
 
-# -------初始化
+设计原则：
+- 分子图（原子 Atom、键 Bond、π 体系 PiSystem）是唯一数据源，
+  分子式、不饱和度、结构指纹等均为派生数据，读取时现算，不再手工维护副本。
+- F/Cl/Br/I 等单价元素是真正的图节点；H 默认由自由价隐式推导，
+  需要表示特殊活性（如酸性氢）时使用显式节点 ActiveH。
+- 结构相等用 Weisfeiler-Lehman 迭代哈希指纹判断，采用严格判等：
+  指纹就是显式图本身；普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
+"""
 
-HASH_NAME_TABLE = {}
-HASH_FEATURE_TABLE = {}
+from __future__ import annotations
 
-SAVE_NAME_NUM = 3  # 后3位用于储存self_name 元素名 最多8个
-# SAVE_FEATURE_NUM = 1  # 用SAVE_FEATURE_NUM位储存特征的数量
-# MAX_FEATURE_NUM = SAVE_NAME_NUM
+import hashlib
+from typing import Literal, TypeAlias, cast
 
-# with open("chemistry_feature.json", 'r', encoding='utf-8') as f:
-#     raw_feature_table = json.loads(f.read())
-# del f
+# ------- 常量 -------
 
-# del raw_feature_table
-CHEMISTRY_BOND_DICT = {"c": 4, "n": 3, "o": 2}
-IGNORE_ELEMENT_LIST = ["h", "f", "cl", "br", "i"]
+# 元素 -> 价键数；表中的元素都可作为显式图节点
+ElementName: TypeAlias = Literal["c", "n", "o", "h", "f", "cl", "br", "i"]
+CHEMISTRY_BOND_DICT: dict[ElementName, int] = {
+    "c": 4,
+    "n": 3,
+    "o": 2,
+    "h": 1,
+    "f": 1,
+    "cl": 1,
+    "br": 1,
+    "i": 1,
+}
+MAX_BOND_ORDER: int = 3
 
-tmp_index1 = 0
-for i in CHEMISTRY_BOND_DICT:
-    HASH_NAME_TABLE[i] = tmp_index1  # tmp_index1用于为每一种可计算元素编号 表示储存在后SAVE_NAME_NUM位中该元素为tmp_index1
-    HASH_NAME_TABLE[tmp_index1] = i
-    tmp_index1 += 1
-
-tmp_index1 = SAVE_NAME_NUM
-HASH_FEATURE_TABLE['-1h'] = tmp_index1
-tmp_index1 += 2  # 特殊用两位储存-h的数量
-# 对于一个特征 用1位进行储存 储存在倒数第tmp_index+1位
-for i in CHEMISTRY_BOND_DICT:
-    feature_name = '-1' + i
-    HASH_FEATURE_TABLE[feature_name] = tmp_index1
-    tmp_index1 += 1
-
-    feature_name = '-2' + i
-    HASH_FEATURE_TABLE[feature_name] = tmp_index1
-    tmp_index1 += 1
-
-    if CHEMISTRY_BOND_DICT[i] >= 3:
-        feature_name = '-3' + i
-        HASH_FEATURE_TABLE[feature_name] = tmp_index1
-        tmp_index1 += 1
-
-for i in IGNORE_ELEMENT_LIST:
-    if i == 'h':
-        continue
-    feature_name = '-1' + i
-    HASH_FEATURE_TABLE[feature_name] = tmp_index1
-    tmp_index1 += 1
-
-HASH_FEATURE_TABLE['c6-'] = tmp_index1
-tmp_index1 += 1
-HASH_FEATURE_TABLE['no2-'] = tmp_index1
-del tmp_index1
-
-# 每一种特征就需要多特定位进行储存
-MAX_FEATURE_NUM = len(HASH_FEATURE_TABLE) + (len(HASH_NAME_TABLE) >> 1)
+# 指纹迭代中的原子标签：初值为元组，细化后收敛为定长十六进制串
+Label: TypeAlias = tuple[object, ...]
+AtomLabel: TypeAlias = Label | str
 
 
-# -------
+# ------- 数据结构 -------
 
 class Molecule:
-    def __init__(self):
-        # self.name = name
-        self.composition = []
-        self.feature = []
-        self.unsaturation = 0
-        self.formula = {'br': 0, 'cl': 0, 'f': 0, 'h': 0, 'i': 0, 'c': 0, 'n': 0, 'o': 0}
-        # self.feature_dict = {}
-        # self.link_dict = {}
-        # self.c_num = 0
-        # self.o_num = 0
-        # self.n_num = 0
+    """分子：原子、键、π 体系的容器，以及所有派生性质的现算入口。"""
 
-    def update(self):
-        self.feature.clear()
-        for atom in self.composition:
-            atom.overall_f = update_overall_f(atom)
-            self.feature.append(atom.overall_f)
-        self.feature.sort()
+    def __init__(self, name: str | None = None) -> None:
+        self.name: str | None = name
+        self.atoms: list[Atom] = []
+        self.bonds: list[Bond] = []
+        self.pi_systems: list[PiSystem] = []
+
+    # ---- 派生数据（全部现算，不存储） ----
+
+    @property
+    def formula(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for atom in self.atoms:
+            counts[atom.name] = counts.get(atom.name, 0) + 1
+        counts['h'] = counts.get('h', 0) + sum(atom.implicit_h for atom in self.atoms)
+        priority = {'c': 0, 'h': 1}
+        return dict(sorted(counts.items(), key=lambda item: (priority.get(item[0], 2), item[0])))
+
+    @property
+    def component_count(self) -> int:
+        """连通分量数（BFS）。"""
+        seen: set[Atom] = set()
+        count = 0
+        for atom in self.atoms:
+            if atom in seen:
+                continue
+            count += 1
+            stack: list[Atom] = [atom]
+            seen.add(atom)
+            while stack:
+                current = stack.pop()
+                for bond in current.bonds:
+                    neighbor = bond.other(current)
+                    if neighbor not in seen:
+                        seen.add(neighbor)
+                        stack.append(neighbor)
+        return count
+
+    @property
+    def ring_count(self) -> int:
+        """环数 = 键数 - 原子数 + 连通分量数。"""
+        if not self.atoms:
+            return 0
+        return len(self.bonds) - len(self.atoms) + self.component_count
+
+    @property
+    def unsaturation(self) -> int:
+        """不饱和度 = 键级超出部分 + 环数 + π 体系贡献。"""
+        bond_part = sum(bond.order - 1 for bond in self.bonds)
+        return bond_part + self.ring_count + sum(pi.dbe for pi in self.pi_systems)
+
+    @property
+    def feature(self) -> list[str]:
+        """结构指纹（与建键顺序无关），用于分子相等判断。"""
+        return _fingerprint(self)
+
+    # ---- 内置方法 ----
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Molecule) and self.feature == other.feature
+
+    def __hash__(self) -> int:
+        # 注意：指纹随结构变化，分子一旦用作集合/字典键就不应再被修改
+        return hash(tuple(self.feature))
+
+    def __repr__(self) -> str:
+        return f"Molecule({_display_formula(self.formula)})"
+
+    def update(self) -> None:
+        """旧接口保留：派生数据均为现算，无需手动更新。"""
+        pass
 
 
 class Atom:
-    def __init__(self, name: str, molecule: Molecule):
+    """原子：只记录身份与连接关系，特征全部派生。"""
+
+    def __init__(self, name: str, molecule: Molecule) -> None:
         name = name.lower()
-        self.name = name
-        self.bond_list = ['-1h' for _ in range(CHEMISTRY_BOND_DICT[name])]
-        self.feature = 1 << MAX_FEATURE_NUM
-        self.feature |= HASH_NAME_TABLE[self.name]
-        self.overall_f = ''
-        self.belong = molecule
-        molecule.composition.append(self)
-        molecule.formula[self.name] += 1
+        if name not in CHEMISTRY_BOND_DICT:
+            raise ValueError(f"{name} 不是可成键元素：{sorted(CHEMISTRY_BOND_DICT)}")
+        self.name: ElementName = cast(ElementName, name)
+        self.bonds: list[Bond] = []   # 参与的所有键（Bond 对象）
+        self.charge: int = 0          # 形式电荷（预留，暂不参与指纹）
+        self.belong: Molecule = molecule
+        molecule.atoms.append(self)
 
-    def remove_atom(self, del_target):
-        self.bond_list[self.bond_list.index(del_target)] = '-1h'
-        self.feature += (1 << SAVE_NAME_NUM)
+    @property
+    def used_valence(self) -> int:
+        """已占用的价键数 = 键级之和 + π 体系槽位数。"""
+        used = sum(bond.order for bond in self.bonds)
+        used += sum(1 for pi in self.belong.pi_systems if self in pi.atoms)
+        return used
 
-    def append_atom(self, add_target):
-        self.bond_list[self.bond_list.index('-1h')] = add_target
-        self.feature -= (1 << SAVE_NAME_NUM)
+    @property
+    def implicit_h(self) -> int:
+        """隐氢数 = 价键数 - 已占用价键数；单价元素不计隐氢（空槽位为自由基）。"""
+        if CHEMISTRY_BOND_DICT[self.name] < 2:
+            return 0
+        return max(0, CHEMISTRY_BOND_DICT[self.name] - self.used_valence)
 
-
-def add_bond(target_atom0, target_atom1, connect_num=1):
-    connected_num = target_atom0.bond_list.count(target_atom1)
-    if connected_num > 0:
-        target_atom0.belong.unsaturation += connect_num
-
-        feature_name = "-" + str(connected_num) + target_atom1.name
-        del_feature(target_atom0, feature_name)
-        feature_name = "-" + str(connected_num + connect_num) + target_atom1.name
-    else:
-        if connect_num > 1:
-            target_atom0.belong.unsaturation += (connect_num - 1)
-        feature_name = "-" + str(connect_num) + target_atom1.name
-    add_feature(target_atom0, feature_name)
-    # print(add_point)
-    for _ in range(connect_num):
-        target_atom0.append_atom(target_atom1)
-
-    target_atom0, target_atom1 = target_atom1, target_atom0
-
-    connected_num = target_atom0.bond_list.count(target_atom1)
-    if connected_num > 0:
-        feature_name = "-" + str(connected_num) + target_atom1.name
-        del_feature(target_atom0, feature_name)
-        feature_name = "-" + str(connected_num + connect_num) + target_atom1.name
-    else:
-        feature_name = "-" + str(connect_num) + target_atom1.name
-    add_feature(target_atom0, feature_name)
-    # print(add_point)
-    for _ in range(connect_num):
-        target_atom0.append_atom(target_atom1)
-        # add_point += 1
+    def __repr__(self) -> str:
+        return f"<Atom {self.name}>"
 
 
-def break_bond(target_atom0, target_atom1, single=False):
-    target_atom0.belong.unsaturation -= (target_atom0.bond_list.count(target_atom1) - 1)
+class ActiveH(Atom):
+    """具有特殊活性的显式氢原子（如酸性氢）。
 
-    del_feature(target_atom0, '-' + str(target_atom0.bond_list.count(target_atom1)) + target_atom1.name)
-    while target_atom1 in target_atom0.bond_list:
-        target_atom0.remove_atom(target_atom1)
-        # if single:
-        #     break
+    作为图上的真实节点参与建键、删键与指纹判等，
+    与普通隐氢、普通显式氢均不同。
+    """
 
-    target_atom0, target_atom1 = target_atom1, target_atom0
-
-    del_feature(target_atom0, '-' + str(target_atom0.bond_list.count(target_atom1)) + target_atom1.name)
-    while target_atom1 in target_atom0.bond_list:
-        target_atom0.remove_atom(target_atom1)
-        # if single:
-        #     break
+    def __init__(self, molecule: Molecule) -> None:
+        super().__init__('h', molecule)
 
 
-def add_pi_bond(target_atom_list: list):
-    if any(i.name == 'c' for i in target_atom_list):
-        feature_name = 'c6-'
-        target_atom_list[0].belong.unsaturation += 4
-    else:
-        feature_name = 'no2-'
-        target_atom_list[0].belong.unsaturation += 1
-    for target_atom in target_atom_list:
-        add_feature(target_atom, feature_name)
-        target_atom.append_atom(target_atom_list)
+class Bond:
+    """键：一等对象，两个端点 + 键级 + 预留的立体化学字段。"""
+
+    def __init__(
+        self,
+        atom1: Atom,
+        atom2: Atom,
+        order: int = 1,
+        stereo: str | None = None,
+        aromatic: bool = False,
+    ) -> None:
+        if atom1 is atom2:
+            raise ValueError("原子不能与自身成键")
+        if atom1.belong is not atom2.belong:
+            raise ValueError("不能连接不同分子的原子")
+        if not 1 <= order <= MAX_BOND_ORDER:
+            raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
+        self.atoms: tuple[Atom, Atom] = (atom1, atom2)
+        self.order: int = order
+        self.stereo: str | None = stereo   # 预留：顺反异构/立体构型
+        self.aromatic: bool = aromatic     # 预留：是否为芳香键
+        atom1.bonds.append(self)
+        atom2.bonds.append(self)
+        atom1.belong.bonds.append(self)
+
+    def other(self, atom: Atom) -> Atom:
+        """返回键的另一端原子。"""
+        atom1, atom2 = self.atoms
+        return atom2 if atom is atom1 else atom1
+
+    def __repr__(self) -> str:
+        atom1, atom2 = self.atoms
+        return f"<Bond {atom1.name}-{atom2.name} order={self.order}>"
 
 
-def break_pi_bond(target_atom_list: list):
-    if any(i.name == 'c' for i in target_atom_list):
-        feature_name = 'c6-'
-        target_atom_list[0].belong.unsaturation -= 4
-    else:
-        feature_name = 'no2-'
-        target_atom_list[0].belong.unsaturation -= 1
-    for target_atom in target_atom_list:
-        del_feature(target_atom, feature_name)
-        target_atom.remove_atom(target_atom_list)
+class PiSystem:
+    """离域 π 体系：一组原子 + 不饱和度贡献（dbe）。"""
+
+    def __init__(
+        self,
+        atoms: list[Atom],
+        dbe: int | None = None,
+        aromatic: bool = False,
+    ) -> None:
+        if len(atoms) < 2:
+            raise ValueError("π 体系至少需要两个原子")
+        self.atoms: list[Atom] = list(atoms)
+        self.dbe: int = _infer_pi_dbe(self.atoms) if dbe is None else dbe
+        self.aromatic: bool = aromatic
+
+    def __repr__(self) -> str:
+        names = ','.join(atom.name for atom in self.atoms)
+        return f"<PiSystem({names}) dbe={self.dbe}>"
 
 
-def add_ignored_atom(target_atom, atom, num=1):
-    target_atom.belong.formula[atom] += 1
-    for _ in range(num):
-        target_atom.append_atom(atom)
-    add_feature(target_atom, '-' + str(num) + atom)
+# ------- 构建与编辑操作 -------
+
+def _find_bond(atom1: Atom, atom2: Atom) -> Bond | None:
+    for bond in atom1.bonds:
+        if bond.other(atom1) is atom2:
+            return bond
+    return None
 
 
-def del_ignored_atom(target_atom, atom):
-    target_atom.belong.formula[atom] -= 1
-    del_feature(target_atom, '-' + str(target_atom.bond_list.count(atom)) + atom)
-    while atom in target_atom.bond_list:
-        target_atom.remove_atom(atom)
-        # if single:
-        #     break
+def _check_valence(atom: Atom, delta: int) -> None:
+    used = atom.used_valence + delta
+    limit = CHEMISTRY_BOND_DICT[atom.name]
+    if used > limit:
+        raise ValueError(f"{atom.name} 原子价键数不足：需要 {used}，最多 {limit}")
 
 
-'''
-def inquire_id(atom_feature: int):
-    return (atom_feature & (((1 << (MAX_FEATURE_NUM + MAX_ID_NUM)) - 1) & (~((1 << MAX_FEATURE_NUM) - 1))))>>MAX_FEATURE_NUM
-# 用于实现对id的查询,至于为什么不用字符串切片,大概是因为位运算它快吧
-# 此函数已正式弃用,但因为位运算很帅,所以将其保留
-'''
+def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
+    """在 atom1 与 atom2 之间建立键；若已存在则提升键级。"""
+    bond = _find_bond(atom1, atom2)
+    if bond is not None:
+        new_order = bond.order + order
+        if new_order > MAX_BOND_ORDER:
+            raise ValueError(f"键级不能超过 {MAX_BOND_ORDER}")
+        _check_valence(atom1, order)
+        _check_valence(atom2, order)
+        bond.order = new_order
+        return bond
+    _check_valence(atom1, order)
+    _check_valence(atom2, order)
+    return Bond(atom1, atom2, order)
 
 
-def inquire_feature(atom_feature: int, feature: str):
-    return atom_feature & (1 << HASH_FEATURE_TABLE[feature])
+def break_bond(atom1: Atom, atom2: Atom) -> None:
+    """断开 atom1 与 atom2 之间的键（全部键级）。"""
+    bond = _find_bond(atom1, atom2)
+    if bond is None:
+        raise ValueError("两个原子之间不存在键")
+    molecule = atom1.belong
+    for atom in bond.atoms:
+        atom.bonds.remove(bond)
+    molecule.bonds.remove(bond)
 
 
-# def inquire_features(atom_feature: int, feature: str):
-#     return (atom_feature & (((1 << (HASH_FEATURE_TABLE[feature] + 3)) - 1) & (~((1 << HASH_FEATURE_TABLE[feature]) - 1)))) >> HASH_FEATURE_TABLE[feature]
-#
-
-def add_feature(atom: Atom, feature: str):
-    atom.feature |= (1 << HASH_FEATURE_TABLE[feature])
-
-
-def del_feature(atom: Atom, feature: str):
-    atom.feature &= ~(1 << HASH_FEATURE_TABLE[feature])
-
-
-def del_atom(self):
-    del_target = self
-    visit_point = 0
-    will_visit = [self]
-    while visit_point < len(will_visit):
-        self = will_visit[visit_point]
-        if self.bond_list.count(del_target) >= 1:
-            feature_name = "-" + str(self.bond_list.count(del_target)) + del_target.name
-            del_feature(self, feature_name)
-            while self.bond_list.count(del_target) >= 1:
-                self.bond_list[self.bond_list.index(del_target)] = '-1h'
-        for connect_index in range(len(self.bond_list)):
-            if (self.bond_list[connect_index] == '-1h') or (self.bond_list[connect_index] in will_visit):
-                continue
-            elif type(self.bond_list[connect_index]) is list:
-                if del_target in self.bond_list[connect_index]:
-                    if del_target.name == 'c':
-                        del_feature(self, 'c6-')
-                    else:
-                        del_feature(self, 'no2-')
-                    self.bond_list[connect_index] = '-1h'
-            else:
-                will_visit.append(self.bond_list[connect_index])
-
-        visit_point += 1
-    del del_target
+def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
+    """为一组原子建立离域 π 体系（成员必须是价键数 ≥ 2 的元素）。"""
+    if len(atom_list) < 2:
+        raise ValueError("π 体系至少需要两个原子")
+    molecule = atom_list[0].belong
+    if any(atom.belong is not molecule for atom in atom_list):
+        raise ValueError("π 体系的所有原子必须属于同一分子")
+    for atom in atom_list:
+        if CHEMISTRY_BOND_DICT[atom.name] < 2:
+            raise ValueError(f"单价元素 {atom.name} 不能参与 π 体系")
+        _check_valence(atom, 1)
+    pi = PiSystem(atom_list, dbe=dbe)
+    molecule.pi_systems.append(pi)
+    return pi
 
 
-# update_overall_f函数,通过BFS实现从自己开始逐步获取所连原子的feature属性
-def update_overall_f(self):
-    visit_point = 0
-    will_visit = [self]
-    distant = 0
-    # self.overall_f += father_f
-    ansL = [str(distant) + str(self.feature)]
-
-    while visit_point < len(will_visit):
-        self = will_visit[visit_point]
-        distant = int(ansL[visit_point][0]) + 1
-        for fa in self.bond_list:
-            if (isinstance(fa, str)) or (fa in will_visit) or (type(fa) is list):
-                continue
-            else:
-                will_visit.append(fa)
-                ansL.append(str(distant) + str(fa.feature))
-        visit_point += 1
-    ansL.sort()
-    return '.'.join(ansL)
+def break_pi_bond(pi_system: PiSystem) -> None:
+    """移除一个 π 体系。"""
+    molecule = pi_system.atoms[0].belong
+    molecule.pi_systems.remove(pi_system)
 
 
-def connect(target_atom_list, is_cyclization=False):
-    for tmp in range(len(target_atom_list) - 1):
-        add_bond(target_atom_list[tmp], target_atom_list[tmp + 1])
+def add_active_h(target_atom: Atom) -> ActiveH:
+    """在 target_atom 的空价键槽位上挂一个活性氢（ActiveH 节点）。"""
+    if target_atom.used_valence >= CHEMISTRY_BOND_DICT[target_atom.name]:
+        raise ValueError(f"{target_atom.name} 原子没有可用的价键槽位")
+    hydrogen = ActiveH(target_atom.belong)
+    add_bond(target_atom, hydrogen)
+    return hydrogen
+
+
+def del_atom(atom: Atom) -> None:
+    """删除原子：清理其所有键与 π 体系参与，并从分子中移除。"""
+    molecule = atom.belong
+    for bond in list(atom.bonds):
+        for endpoint in bond.atoms:
+            endpoint.bonds.remove(bond)
+        molecule.bonds.remove(bond)
+    atom.bonds.clear()
+    for pi in list(molecule.pi_systems):
+        if atom in pi.atoms:
+            pi.atoms.remove(atom)
+            if len(pi.atoms) < 2:
+                molecule.pi_systems.remove(pi)
+    molecule.atoms.remove(atom)
+
+
+def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
+    """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环。"""
+    if len(target_atom_list) < 2:
+        raise ValueError("至少需要两个原子")
+    for index in range(len(target_atom_list) - 1):
+        add_bond(target_atom_list[index], target_atom_list[index + 1])
     if is_cyclization:
         add_bond(target_atom_list[0], target_atom_list[-1])
 
 
-if __name__ == '__main__':
-    print(MAX_FEATURE_NUM, HASH_FEATURE_TABLE)
-    # a = Molecule()
-    # b = Molecule()
-    # c1 = Atom('c', a)
-    # c2 = Atom('c', a)
-    # c3 = Atom('c', b)
-    # c4 = Atom('c', b)
-    # c1.add_bond(c2, 2)
-    # c3.add_bond(c4)
-    # c3.add_bond(c4)
-    # a.update()
-    # b.update()
-    # print(a.feature)
-    # print(b.feature)
-    # print(a == b)
+# ------- 结构指纹（Weisfeiler-Lehman） -------
 
-    benzaldehyde = Molecule()
-    # benzaldehyde.add_atom('c', 7)
-    # benzaldehyde.add_atom('o')
+def _infer_pi_dbe(atoms: list[Atom]) -> int:
+    """根据 π 体系组成推断不饱和度贡献：全碳芳香体系 ≈ 原子数/2，硝基型 ≈ 1。"""
+    element_counts: dict[str, int] = {}
+    for atom in atoms:
+        element_counts[atom.name] = element_counts.get(atom.name, 0) + 1
+    if len(element_counts) == 1 and 'c' in element_counts:
+        return len(atoms) // 2
+    if element_counts.get('n') == 1 and element_counts.get('o') == 2 and len(atoms) == 3:
+        return 1
+    return 1
 
-    c1 = Atom("C", benzaldehyde)
-    c2 = Atom("c", benzaldehyde)
-    c3 = Atom("c", benzaldehyde)
-    c4 = Atom("c", benzaldehyde)
-    c5 = Atom("c", benzaldehyde)
-    c6 = Atom("c", benzaldehyde)
-    c7 = Atom("c", benzaldehyde)
-    # c1-c7 o1 构成苯醛
-    o1 = Atom("o", benzaldehyde)
-    # o2 = Atom("o", benzaldehyde)
-    # o3 = Atom("o", benzaldehyde)
 
-    connect([c2, c3, c4, c5, c6, c7], True)
-    add_bond(c1, c4)
-    add_bond(c1, o1, 2)
-    # c1.add_bond(o1)
-    # c1.add_bond(o1)
+def _initial_label(atom: Atom) -> Label:
+    # 类型即标记：ActiveH 子类与普通显式氢、隐氢区分开
+    return (atom.name, atom.charge, isinstance(atom, ActiveH))
 
-    benzaldehyde1 = Molecule()
 
-    c11 = Atom("C", benzaldehyde1)
-    c21 = Atom("c", benzaldehyde1)
-    c31 = Atom("c", benzaldehyde1)
-    c41 = Atom("c", benzaldehyde1)
-    c51 = Atom("c", benzaldehyde1)
-    c611 = Atom("c", benzaldehyde1)
-    c71 = Atom("c", benzaldehyde1)
-    # c1-c7 o1 构成苯醛
-    o11 = Atom("o", benzaldehyde1)
-    # o2 = Atom("o", benzaldehyde1)
-    # o3 = Atom("o", benzaldehyde1)
+def _refine_label(atom: Atom, labels: dict[Atom, AtomLabel], molecule: Molecule) -> str:
+    neighbor_info = tuple(sorted(
+        (labels[bond.other(atom)], bond.order) for bond in atom.bonds
+    ))
+    pi_info: list[tuple[int, tuple[AtomLabel, ...]]] = []
+    for pi in molecule.pi_systems:
+        if atom in pi.atoms:
+            others = tuple(sorted(labels[other] for other in pi.atoms if other is not atom))
+            pi_info.append((pi.dbe, others))
+    return _digest((_initial_label(atom), neighbor_info, tuple(sorted(pi_info))))
 
-    connect([c11, c21, c31, c41, c51, c611, c71])
-    add_bond(c11, c611)
-    add_bond(c71, o11, 2)
 
-    benzaldehyde.update()
-    benzaldehyde1.update()
-    print(benzaldehyde.feature)
-    print(benzaldehyde1.feature)
-    print()
-    print(bool(benzaldehyde.feature == benzaldehyde1.feature))
-    for i in c1.bond_list:
-        if i == '-1h':
+def _digest(value: object) -> str:
+    return hashlib.md5(repr(value).encode('utf-8')).hexdigest()
+
+
+def _fingerprint(molecule: Molecule) -> list[str]:
+    """返回排序后的稳定指纹列表：与建键顺序无关，可作相等判断。"""
+    if not molecule.atoms:
+        return []
+    labels: dict[Atom, AtomLabel] = {atom: _initial_label(atom) for atom in molecule.atoms}
+    for _ in range(len(molecule.atoms)):
+        new_labels: dict[Atom, AtomLabel] = {
+            atom: _refine_label(atom, labels, molecule) for atom in molecule.atoms
+        }
+        if all(new_labels[atom] == labels[atom] for atom in molecule.atoms):
+            labels = new_labels
+            break
+        labels = new_labels
+    header = _digest((
+        len(molecule.atoms), len(molecule.bonds),
+        molecule.unsaturation, len(molecule.pi_systems),
+    ))
+    return [header] + sorted(_digest(labels[atom]) for atom in molecule.atoms)
+
+
+def _display_formula(formula: dict[str, int]) -> str:
+    parts: list[str] = []
+    for element, num in formula.items():
+        if num == 0:
             continue
-        print(i.overall_f)
-
-    add_pi_bond([c2, c3, c4, c5, c6, c7])
-    print(c1.name, c1.overall_f)
-    print()
-    print(benzaldehyde.composition)
-    for i in benzaldehyde.composition:
-        print(i.name, i.feature, i.overall_f)
-
-    print(c1.bond_list, c1)
-    print(c2.bond_list, c2.name)
-    print()
-    print(benzaldehyde.unsaturation)
-    # data = json.dumps(benzaldehyde.feature)
-    # print(data)
+        display = element.capitalize()
+        parts.append(display + (str(num) if num != 1 else ''))
+    return ''.join(parts)
