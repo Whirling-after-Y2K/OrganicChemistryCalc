@@ -91,6 +91,16 @@ class Molecule:
         bond_part = sum(bond.order - 1 for bond in self.bonds)
         return bond_part + self.ring_count + sum(pi.dbe for pi in self.pi_systems)
 
+    def validate(self) -> None:
+        """校验结构不变量；无效结构抛 ValueError。
+
+        当前检查：每个 π 体系的成员必须通过键彼此连通。
+        指纹计算（feature / __eq__）前会自动调用。
+        """
+        for pi in self.pi_systems:
+            if not _pi_members_connected(pi.atoms):
+                raise ValueError("π 体系成员必须通过键彼此连通")
+
     @property
     def feature(self) -> list[str]:
         """结构指纹（与建键顺序无关），用于分子相等判断。"""
@@ -101,16 +111,12 @@ class Molecule:
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Molecule) and self.feature == other.feature
 
-    def __hash__(self) -> int:
-        # 注意：指纹随结构变化，分子一旦用作集合/字典键就不应再被修改
-        return hash(tuple(self.feature))
+    # 注意：Molecule 定义了 __eq__ 且结构可变，因此不定义 __hash__，
+    # Python 会自动令其实例不可哈希；需要作集合/字典键时用 tuple(molecule.feature)。
+    __hash__ = None  # type: ignore[assignment]
 
     def __repr__(self) -> str:
         return f"Molecule({_display_formula(self.formula)})"
-
-    def update(self) -> None:
-        """旧接口保留：派生数据均为现算，无需手动更新。"""
-        pass
 
 
 class Atom:
@@ -242,19 +248,51 @@ def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
     return Bond(atom1, atom2, order)
 
 
-def break_bond(atom1: Atom, atom2: Atom) -> None:
-    """断开 atom1 与 atom2 之间的键（全部键级）。"""
+def break_bond(atom1: Atom, atom2: Atom, order: int = 0) -> None:
+    """断开 atom1 与 atom2 之间的键。
+
+    order 为 0（默认）时整根断开；order > 0 时降低 N 个键级，
+    若不足以降到 1 则整根断开；order < 0 抛 ValueError。
+    """
+    if order < 0:
+        raise ValueError("order 必须 >= 0")
     bond = _find_bond(atom1, atom2)
     if bond is None:
         raise ValueError("两个原子之间不存在键")
+    if order > 0 and bond.order - order >= 1:
+        bond.order -= order
+        return
     molecule = atom1.belong
     for atom in bond.atoms:
         atom.bonds.remove(bond)
     molecule.bonds.remove(bond)
 
 
+def _pi_members_connected(atom_list: list[Atom]) -> bool:
+    """π 体系成员是否通过键彼此连通（诱导子图连通），且无重复成员。"""
+    members = set(atom_list)
+    if len(members) != len(atom_list):
+        return False
+    visited: set[Atom] = {atom_list[0]}
+    stack: list[Atom] = [atom_list[0]]
+    while stack:
+        current = stack.pop()
+        for bond in current.bonds:
+            neighbor = bond.other(current)
+            if neighbor in members and neighbor not in visited:
+                visited.add(neighbor)
+                stack.append(neighbor)
+    return visited == members
+
+
 def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
-    """为一组原子建立离域 π 体系（成员必须是价键数 ≥ 2 的元素）。"""
+    """为一组原子建立离域 π 体系。
+
+    校验顺序：成员数 ≥ 2 → 同分子 → 单价元素拒绝 → 无重复成员 →
+    每原子最多参与一个 π 体系 → 价键容量。
+    成员连通性在 Molecule.validate()（指纹计算前）统一校验，
+    以允许"先建 π 体系、后补完 σ 骨架"的增量构建。
+    """
     if len(atom_list) < 2:
         raise ValueError("π 体系至少需要两个原子")
     molecule = atom_list[0].belong
@@ -263,6 +301,12 @@ def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     for atom in atom_list:
         if CHEMISTRY_BOND_DICT[atom.name] < 2:
             raise ValueError(f"单价元素 {atom.name} 不能参与 π 体系")
+    if len(set(atom_list)) != len(atom_list):
+        raise ValueError("π 体系成员不能重复")
+    for atom in atom_list:
+        if any(atom in pi.atoms for pi in molecule.pi_systems):
+            raise ValueError(f"{atom.name} 原子已参与其他 π 体系")
+    for atom in atom_list:
         _check_valence(atom, 1)
     pi = PiSystem(atom_list, dbe=dbe)
     molecule.pi_systems.append(pi)
@@ -301,9 +345,11 @@ def del_atom(atom: Atom) -> None:
 
 
 def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
-    """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环。"""
+    """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环（至少 3 个原子）。"""
     if len(target_atom_list) < 2:
         raise ValueError("至少需要两个原子")
+    if is_cyclization and len(target_atom_list) < 3:
+        raise ValueError("至少需要 3 个原子才能成环")
     for index in range(len(target_atom_list) - 1):
         add_bond(target_atom_list[index], target_atom_list[index + 1])
     if is_cyclization:
@@ -349,6 +395,7 @@ def _fingerprint(molecule: Molecule) -> list[str]:
     """返回排序后的稳定指纹列表：与建键顺序无关，可作相等判断。"""
     if not molecule.atoms:
         return []
+    molecule.validate()
     labels: dict[Atom, AtomLabel] = {atom: _initial_label(atom) for atom in molecule.atoms}
     for _ in range(len(molecule.atoms)):
         new_labels: dict[Atom, AtomLabel] = {
