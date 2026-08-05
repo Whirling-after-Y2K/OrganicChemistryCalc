@@ -8,6 +8,9 @@
   需要表示特殊活性（如酸性氢）时使用显式节点 ActiveH。
 - 结构相等用 Weisfeiler-Lehman 迭代哈希指纹判断，采用严格判等：
   指纹就是显式图本身；普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
+- 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
+  离域体系一律用 add_pi_bond 创建 PiSystem 表示，不得用多重键代替。
+  违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
 """
 
 from __future__ import annotations
@@ -87,19 +90,43 @@ class Molecule:
 
     @property
     def unsaturation(self) -> int:
-        """不饱和度 = 键级超出部分 + 环数 + π 体系贡献。"""
+        """不饱和度 = 键级超出部分 + 环数 + π 体系贡献。
+
+        计算前先校验结构（validate），无效结构抛 ValueError，
+        避免静默给出错误数值。
+        """
+        self.validate()
         bond_part = sum(bond.order - 1 for bond in self.bonds)
         return bond_part + self.ring_count + sum(pi.dbe for pi in self.pi_systems)
 
     def validate(self) -> None:
         """校验结构不变量；无效结构抛 ValueError。
 
-        当前检查：每个 π 体系的成员必须通过键彼此连通。
-        指纹计算（feature / __eq__）前会自动调用。
+        检查范围：
+        - 容器一致性：molecule.bonds 与各 atom.bonds 双向一致、
+          无重复、atom.belong 正确、键与 π 成员属于分子；
+        - 键自身：1 <= order <= MAX_BOND_ORDER，无自环；
+        - 价键：每个原子的 used_valence 不超过其价键数；
+        - π 体系：成员 >= 2、无重复、连通、成员间无显式多重键、
+          每原子至多参与一个 π 体系、单价元素不参与。
+        指纹计算（feature / __eq__）与 unsaturation 前会自动调用。
         """
+        _check_containers(self)
+        for atom in self.atoms:
+            _check_valence(atom, 0)
+        for bond in self.bonds:
+            if bond.atoms[0] is bond.atoms[1]:
+                raise ValueError("原子不能与自身成键")
+            if not 1 <= bond.order <= MAX_BOND_ORDER:
+                raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
         for pi in self.pi_systems:
-            if not _pi_members_connected(pi.atoms):
-                raise ValueError("π 体系成员必须通过键彼此连通")
+            _check_pi_system(pi)
+        participation: dict[Atom, int] = {}
+        for pi in self.pi_systems:
+            for atom in pi.atoms:
+                participation[atom] = participation.get(atom, 0) + 1
+                if participation[atom] > 1:
+                    raise ValueError(f"{atom.name} 原子已参与多个 π 体系")
 
     @property
     def feature(self) -> list[str]:
@@ -197,7 +224,11 @@ class Bond:
 
 
 class PiSystem:
-    """离域 π 体系：一组原子 + 不饱和度贡献（dbe）。"""
+    """离域 π 体系：一组原子 + 不饱和度贡献（dbe）。
+
+    表示公约：离域体系一律用 PiSystem 表示，成员之间只允许单键；
+    显式多重键仅表示局域键，不得与 π 体系混用于同一对原子。
+    """
 
     def __init__(
         self,
@@ -232,17 +263,34 @@ def _check_valence(atom: Atom, delta: int) -> None:
         raise ValueError(f"{atom.name} 原子价键数不足：需要 {used}，最多 {limit}")
 
 
+def _in_same_pi_system(atom1: Atom, atom2: Atom, molecule: Molecule) -> bool:
+    """atom1 与 atom2 是否同属于某个 π 体系。"""
+    return any(atom1 in pi.atoms and atom2 in pi.atoms for pi in molecule.pi_systems)
+
+
+def _check_multiple_bond_within_pi(atom1: Atom, atom2: Atom, order: int) -> None:
+    """表示公约：同一 π 体系成员之间只允许单键。"""
+    if order > 1 and _in_same_pi_system(atom1, atom2, atom1.belong):
+        raise ValueError("π 体系成员之间不能画显式多重键")
+
+
 def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
-    """在 atom1 与 atom2 之间建立键；若已存在则提升键级。"""
+    """在 atom1 与 atom2 之间建立键；若已存在则提升键级。
+
+    表示公约：同一 π 体系成员之间只允许单键；离域体系请用 add_pi_bond，
+    不要用显式多重键代替。
+    """
     bond = _find_bond(atom1, atom2)
     if bond is not None:
         new_order = bond.order + order
         if new_order > MAX_BOND_ORDER:
             raise ValueError(f"键级不能超过 {MAX_BOND_ORDER}")
+        _check_multiple_bond_within_pi(atom1, atom2, new_order)
         _check_valence(atom1, order)
         _check_valence(atom2, order)
         bond.order = new_order
         return bond
+    _check_multiple_bond_within_pi(atom1, atom2, order)
     _check_valence(atom1, order)
     _check_valence(atom2, order)
     return Bond(atom1, atom2, order)
@@ -285,11 +333,70 @@ def _pi_members_connected(atom_list: list[Atom]) -> bool:
     return visited == members
 
 
+def _members_have_multiple_bond(atom_list: list[Atom]) -> bool:
+    """成员两两之间是否存在 order > 1 的显式键。"""
+    members = set(atom_list)
+    for atom in atom_list:
+        for bond in atom.bonds:
+            if bond.order > 1 and bond.other(atom) in members:
+                return True
+    return False
+
+
+def _check_containers(molecule: Molecule) -> None:
+    """容器一致性：四表双向一致、无重复、belong 正确。"""
+    atom_ids: set[Atom] = set()
+    for atom in molecule.atoms:
+        if atom in atom_ids:
+            raise ValueError("molecule.atoms 中存在重复原子")
+        atom_ids.add(atom)
+        if atom.belong is not molecule:
+            raise ValueError("原子 belong 与所属分子不一致")
+        seen: set[Bond] = set()
+        for bond in atom.bonds:
+            if bond in seen:
+                raise ValueError("原子 bonds 列表中存在重复键")
+            seen.add(bond)
+            if bond not in molecule.bonds:
+                raise ValueError("原子引用的键不在 molecule.bonds 中")
+    bond_ids: set[Bond] = set()
+    for bond in molecule.bonds:
+        if bond in bond_ids:
+            raise ValueError("molecule.bonds 中存在重复键")
+        bond_ids.add(bond)
+        atom1, atom2 = bond.atoms
+        if atom1 not in atom_ids or atom2 not in atom_ids:
+            raise ValueError("键端点不属于分子原子集合")
+        if atom1.belong is not molecule or atom2.belong is not molecule:
+            raise ValueError("键端点不属于同一分子")
+        if bond not in atom1.bonds or bond not in atom2.bonds:
+            raise ValueError("molecule.bonds 中的键未被两端原子引用")
+    for pi in molecule.pi_systems:
+        for atom in pi.atoms:
+            if atom not in atom_ids:
+                raise ValueError("π 体系成员不属于分子原子集合")
+
+
+def _check_pi_system(pi: PiSystem) -> None:
+    """π 体系完整性：成员数量、重复、连通、多重键、单价元素。"""
+    if len(pi.atoms) < 2:
+        raise ValueError("π 体系至少需要两个原子")
+    if len(set(pi.atoms)) != len(pi.atoms):
+        raise ValueError("π 体系成员不能重复")
+    for atom in pi.atoms:
+        if CHEMISTRY_BOND_DICT[atom.name] < 2:
+            raise ValueError(f"单价元素 {atom.name} 不能参与 π 体系")
+    if not _pi_members_connected(pi.atoms):
+        raise ValueError("π 体系成员必须通过键彼此连通")
+    if _members_have_multiple_bond(pi.atoms):
+        raise ValueError("π 体系成员之间不能存在显式多重键")
+
+
 def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     """为一组原子建立离域 π 体系。
 
     校验顺序：成员数 ≥ 2 → 同分子 → 单价元素拒绝 → 无重复成员 →
-    每原子最多参与一个 π 体系 → 价键容量。
+    成员间无显式多重键 → 每原子最多参与一个 π 体系 → 价键容量。
     成员连通性在 Molecule.validate()（指纹计算前）统一校验，
     以允许"先建 π 体系、后补完 σ 骨架"的增量构建。
     """
@@ -303,6 +410,8 @@ def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
             raise ValueError(f"单价元素 {atom.name} 不能参与 π 体系")
     if len(set(atom_list)) != len(atom_list):
         raise ValueError("π 体系成员不能重复")
+    if _members_have_multiple_bond(atom_list):
+        raise ValueError("π 体系成员之间已存在显式多重键")
     for atom in atom_list:
         if any(atom in pi.atoms for pi in molecule.pi_systems):
             raise ValueError(f"{atom.name} 原子已参与其他 π 体系")
