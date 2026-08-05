@@ -10,11 +10,13 @@
   再以自研回溯同构确认做精确判等（WL 预筛可能存在假阳性，
   但不会把真正相等的结构判为不等）。采用严格判等：
   普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
-- 指纹快照契约：结构指纹是快照，编辑完成后必须调用 Molecule.update()
-  重新计算；未 update() 时读取 feature 或做 == 判等会抛 ValueError。
-  直接修改 bond.order / atom.charge / pi.dbe 等标量字段属契约外操作。
+- 指纹快照契约：结构指纹是快照，任何编辑操作（建/断键、增删 π 体系、
+  增删原子等）会自动失效快照；失效后必须调用 Molecule.update() 重算，
+  否则读取 feature 或做 == 判等会抛 ValueError。直接修改
+  bond.order / atom.charge / pi.dbe 等标量字段属契约外操作，
+  修改后同样需要手动 update()。
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
-  离域体系一律用 add_pi_bond 创建 PiSystem 表示，不得用多重键代替。
+  离域体系一律用 add_pi_system 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
 """
 
@@ -46,6 +48,14 @@ AtomLabel: TypeAlias = Label | str
 
 # ------- 数据结构 -------
 
+class _FingerprintSnapshot:
+    """update() 后生效的指纹快照：feature 列表 + WL 原子标签。"""
+
+    def __init__(self, feature: list[str], labels: dict[Atom, AtomLabel]) -> None:
+        self.feature: list[str] = feature
+        self.labels: dict[Atom, AtomLabel] = labels
+
+
 class Molecule:
     """分子：原子、键、π 体系的容器，以及所有派生性质的现算入口。"""
 
@@ -54,7 +64,11 @@ class Molecule:
         self.atoms: list[Atom] = []
         self.bonds: list[Bond] = []
         self.pi_systems: list[PiSystem] = []
-        self._feature_cache: list[str] | None = None  # update() 后生效的指纹快照
+        self._snapshot: _FingerprintSnapshot | None = None  # update() 后生效的指纹快照
+
+    def _invalidate(self) -> None:
+        """编辑后失效指纹快照；下次读取 feature / == 判等前必须 update()。"""
+        self._snapshot = None
 
     # ---- 派生数据（全部现算，不存储） ----
 
@@ -102,8 +116,7 @@ class Molecule:
         避免静默给出错误数值。
         """
         self.validate()
-        bond_part = sum(bond.order - 1 for bond in self.bonds)
-        return bond_part + self.ring_count + sum(pi.dbe for pi in self.pi_systems)
+        return _unsaturation_value(self)
 
     def validate(self) -> None:
         """校验结构不变量；无效结构抛 ValueError。
@@ -137,12 +150,13 @@ class Molecule:
     def update(self) -> None:
         """校验结构并重算结构指纹快照。
 
-        编辑完成后必须调用；未 update() 时读取 feature 或做 == 判等
-        会抛 ValueError。直接修改 bond.order / atom.charge / pi.dbe
-        等标量字段属契约外操作，修改后同样需要重新 update()。
+        任何编辑操作会自动失效快照；失效后必须调用 update()，
+        未 update() 时读取 feature 或做 == 判等会抛 ValueError。
+        直接修改 bond.order / atom.charge / pi.dbe 等标量字段属
+        契约外操作，修改后同样需要重新 update()。
         """
         self.validate()
-        self._feature_cache = _fingerprint(self)
+        self._snapshot = _build_snapshot(self)
 
     @property
     def feature(self) -> list[str]:
@@ -150,9 +164,9 @@ class Molecule:
 
         返回防御性拷贝：外部修改返回值不影响内部缓存。
         """
-        if self._feature_cache is None:
+        if self._snapshot is None:
             raise ValueError("请先调用 update()")
-        return list(self._feature_cache)
+        return list(self._snapshot.feature)
 
     # ---- 内置方法 ----
 
@@ -165,7 +179,12 @@ class Molecule:
             return False
         if self.feature != other.feature:
             return False
-        return _are_isomorphic(self, other)
+        assert self._snapshot is not None and other._snapshot is not None
+        return _are_isomorphic(
+            self, other,
+            colors1=self._snapshot.labels,
+            colors2=other._snapshot.labels,
+        )
 
     # 注意：Molecule 定义了 __eq__ 且结构可变，因此不定义 __hash__，
     # Python 会自动令其实例不可哈希；需要作集合/字典键时用 tuple(molecule.feature)。
@@ -184,9 +203,10 @@ class Atom:
             raise ValueError(f"{name} 不是可成键元素：{sorted(CHEMISTRY_BOND_DICT)}")
         self.name: ElementName = cast(ElementName, name)
         self.bonds: list[Bond] = []   # 参与的所有键（Bond 对象）
-        self.charge: int = 0          # 形式电荷（预留，暂不参与指纹）
+        self.charge: int = 0          # 形式电荷（预留：不影响价态/分子式，当前仅参与判等指纹）
         self.belong: Molecule = molecule
         molecule.atoms.append(self)
+        molecule._invalidate()
 
     @property
     def used_valence(self) -> int:
@@ -236,11 +256,12 @@ class Bond:
             raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
         self.atoms: tuple[Atom, Atom] = (atom1, atom2)
         self.order: int = order
-        self.stereo: str | None = stereo   # 预留：顺反异构/立体构型
-        self.aromatic: bool = aromatic     # 预留：是否为芳香键
+        self.stereo: str | None = stereo   # 预留：顺反异构/立体构型（当前不参与任何计算）
+        self.aromatic: bool = aromatic     # 预留：芳香键标记（当前不参与任何计算；芳香性由 PiSystem 表示）
         atom1.bonds.append(self)
         atom2.bonds.append(self)
         atom1.belong.bonds.append(self)
+        atom1.belong._invalidate()
 
     def other(self, atom: Atom) -> Atom:
         """返回键的另一端原子。"""
@@ -269,7 +290,7 @@ class PiSystem:
             raise ValueError("π 体系至少需要两个原子")
         self.atoms: list[Atom] = list(atoms)
         self.dbe: int = _infer_pi_dbe(self.atoms) if dbe is None else dbe
-        self.aromatic: bool = aromatic
+        self.aromatic: bool = aromatic  # 预留：芳香性标记（当前不参与任何计算）
 
     def __repr__(self) -> str:
         names = ','.join(atom.name for atom in self.atoms)
@@ -306,7 +327,7 @@ def _check_multiple_bond_within_pi(atom1: Atom, atom2: Atom, order: int) -> None
 def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
     """在 atom1 与 atom2 之间建立键；若已存在则提升键级。
 
-    表示公约：同一 π 体系成员之间只允许单键；离域体系请用 add_pi_bond，
+    表示公约：同一 π 体系成员之间只允许单键；离域体系请用 add_pi_system，
     不要用显式多重键代替。
     """
     bond = _find_bond(atom1, atom2)
@@ -318,6 +339,7 @@ def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
         _check_valence(atom1, order)
         _check_valence(atom2, order)
         bond.order = new_order
+        atom1.belong._invalidate()
         return bond
     _check_multiple_bond_within_pi(atom1, atom2, order)
     _check_valence(atom1, order)
@@ -338,11 +360,13 @@ def break_bond(atom1: Atom, atom2: Atom, order: int = 0) -> None:
         raise ValueError("两个原子之间不存在键")
     if order > 0 and bond.order - order >= 1:
         bond.order -= order
+        atom1.belong._invalidate()
         return
     molecule = atom1.belong
     for atom in bond.atoms:
         atom.bonds.remove(bond)
     molecule.bonds.remove(bond)
+    molecule._invalidate()
 
 
 def _pi_members_connected(atom_list: list[Atom]) -> bool:
@@ -388,6 +412,8 @@ def _check_containers(molecule: Molecule) -> None:
             seen.add(bond)
             if bond not in molecule.bonds:
                 raise ValueError("原子引用的键不在 molecule.bonds 中")
+            if atom not in bond.atoms:
+                raise ValueError("原子 bonds 列表中存在不以该原子为端点的键")
     bond_ids: set[Bond] = set()
     for bond in molecule.bonds:
         if bond in bond_ids:
@@ -421,7 +447,7 @@ def _check_pi_system(pi: PiSystem) -> None:
         raise ValueError("π 体系成员之间不能存在显式多重键")
 
 
-def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
+def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     """为一组原子建立离域 π 体系。
 
     校验顺序：成员数 ≥ 2 → 同分子 → 单价元素拒绝 → 无重复成员 →
@@ -448,13 +474,15 @@ def add_pi_bond(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
         _check_valence(atom, 1)
     pi = PiSystem(atom_list, dbe=dbe)
     molecule.pi_systems.append(pi)
+    molecule._invalidate()
     return pi
 
 
-def break_pi_bond(pi_system: PiSystem) -> None:
+def remove_pi_system(pi_system: PiSystem) -> None:
     """移除一个 π 体系。"""
     molecule = pi_system.atoms[0].belong
     molecule.pi_systems.remove(pi_system)
+    molecule._invalidate()
 
 
 def add_active_h(target_atom: Atom) -> ActiveH:
@@ -480,18 +508,55 @@ def del_atom(atom: Atom) -> None:
             if len(pi.atoms) < 2:
                 molecule.pi_systems.remove(pi)
     molecule.atoms.remove(atom)
+    molecule._invalidate()
 
 
 def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
-    """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环（至少 3 个原子）。"""
+    """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环（至少 3 个原子）。
+
+    原子性：先对整个连接序列做累积预校验（同分子、非自环、键级上限、
+    π 体系公约、价键容量），全部通过后再统一建键/升键级；
+    任一步失败都不会留下部分键或部分升键。
+    """
     if len(target_atom_list) < 2:
         raise ValueError("至少需要两个原子")
     if is_cyclization and len(target_atom_list) < 3:
         raise ValueError("至少需要 3 个原子才能成环")
-    for index in range(len(target_atom_list) - 1):
-        add_bond(target_atom_list[index], target_atom_list[index + 1])
+    pairs: list[tuple[Atom, Atom]] = [
+        (target_atom_list[index], target_atom_list[index + 1])
+        for index in range(len(target_atom_list) - 1)
+    ]
     if is_cyclization:
-        add_bond(target_atom_list[0], target_atom_list[-1])
+        pairs.append((target_atom_list[0], target_atom_list[-1]))
+
+    # 预校验：模拟整段连接对每个原子价键与已有键键级的累积占用
+    pending_valence: dict[Atom, int] = {}
+    pending_upgrade: dict[Bond, int] = {}
+    for atom1, atom2 in pairs:
+        if atom1.belong is not atom2.belong:
+            raise ValueError("不能连接不同分子的原子")
+        if atom1 is atom2:
+            raise ValueError("原子不能与自身成键")
+        bond = _find_bond(atom1, atom2)
+        if bond is not None:
+            upgrade = pending_upgrade.get(bond, 0) + 1
+            new_order = bond.order + upgrade
+            if new_order > MAX_BOND_ORDER:
+                raise ValueError(f"键级不能超过 {MAX_BOND_ORDER}")
+            _check_multiple_bond_within_pi(atom1, atom2, new_order)
+            _check_valence(atom1, pending_valence.get(atom1, 0) + 1)
+            _check_valence(atom2, pending_valence.get(atom2, 0) + 1)
+            pending_upgrade[bond] = upgrade
+        else:
+            _check_multiple_bond_within_pi(atom1, atom2, 1)
+            _check_valence(atom1, pending_valence.get(atom1, 0) + 1)
+            _check_valence(atom2, pending_valence.get(atom2, 0) + 1)
+        pending_valence[atom1] = pending_valence.get(atom1, 0) + 1
+        pending_valence[atom2] = pending_valence.get(atom2, 0) + 1
+
+    # 应用：预校验已全部通过，按序建键/升键级
+    for atom1, atom2 in pairs:
+        add_bond(atom1, atom2)
 
 
 # ------- 结构指纹（Weisfeiler-Lehman） -------
@@ -543,17 +608,23 @@ def _wl_labels(molecule: Molecule) -> dict[Atom, AtomLabel]:
     return labels
 
 
-def _fingerprint(molecule: Molecule) -> list[str]:
-    """返回排序后的稳定指纹列表：与建键顺序无关，作相等判断的预筛输入。"""
+def _unsaturation_value(molecule: Molecule) -> int:
+    """不饱和度数值（前置条件：结构已通过 validate()）。"""
+    bond_part = sum(bond.order - 1 for bond in molecule.bonds)
+    return bond_part + molecule.ring_count + sum(pi.dbe for pi in molecule.pi_systems)
+
+
+def _build_snapshot(molecule: Molecule) -> _FingerprintSnapshot:
+    """构造指纹快照（前置条件：结构已通过 validate()）。"""
     if not molecule.atoms:
-        return []
-    molecule.validate()
+        return _FingerprintSnapshot([], {})
     labels = _wl_labels(molecule)
     header = _digest((
         len(molecule.atoms), len(molecule.bonds),
-        molecule.unsaturation, len(molecule.pi_systems),
+        _unsaturation_value(molecule), len(molecule.pi_systems),
     ))
-    return [header] + sorted(_digest(labels[atom]) for atom in molecule.atoms)
+    feature = [header] + sorted(_digest(labels[atom]) for atom in molecule.atoms)
+    return _FingerprintSnapshot(feature, labels)
 
 
 def _build_adjacency(molecule: Molecule) -> dict[Atom, dict[Atom, tuple[int, ...]]]:
@@ -581,22 +652,31 @@ def _pi_index(molecule: Molecule) -> dict[Atom, tuple[int, int]]:
     return atom_pi
 
 
-def _are_isomorphic(m1: Molecule, m2: Molecule) -> bool:
+def _are_isomorphic(
+    m1: Molecule,
+    m2: Molecule,
+    colors1: dict[Atom, AtomLabel] | None = None,
+    colors2: dict[Atom, AtomLabel] | None = None,
+) -> bool:
     """精确同构判断：WL 颜色剪枝 + VF2 风格回溯确认。
 
     保持顶点标签（元素 / 形式电荷 / 是否 ActiveH）、键级、π 体系
     （dbe 与成员集合）三者一致；供 __eq__ 在 WL 预筛通过后做精确确认。
+    colors1/colors2 传入 update() 缓存的 WL 标签时可跳过 validate() 与
+    WL 迭代（__eq__ 使用）；缺省时自行校验并计算。
     """
-    m1.validate()
-    m2.validate()
+    if colors1 is None:
+        m1.validate()
+        colors1 = _wl_labels(m1)
+    if colors2 is None:
+        m2.validate()
+        colors2 = _wl_labels(m2)
     if not m1.atoms:
         return not m2.atoms
     if (len(m1.atoms), len(m1.bonds), len(m1.pi_systems)) != (
             len(m2.atoms), len(m2.bonds), len(m2.pi_systems)):
         return False
 
-    colors1 = _wl_labels(m1)
-    colors2 = _wl_labels(m2)
     if sorted(colors1.values()) != sorted(colors2.values()):
         return False
 
