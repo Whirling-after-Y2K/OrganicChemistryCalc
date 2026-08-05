@@ -3,11 +3,16 @@
 
 设计原则：
 - 分子图（原子 Atom、键 Bond、π 体系 PiSystem）是唯一数据源，
-  分子式、不饱和度、结构指纹等均为派生数据，读取时现算，不再手工维护副本。
+  分子式、不饱和度等派生数据读取时现算，不再手工维护副本。
 - F/Cl/Br/I 等单价元素是真正的图节点；H 默认由自由价隐式推导，
   需要表示特殊活性（如酸性氢）时使用显式节点 ActiveH。
-- 结构相等用 Weisfeiler-Lehman 迭代哈希指纹判断，采用严格判等：
-  指纹就是显式图本身；普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
+- 结构相等：先以 Weisfeiler-Lehman 迭代哈希指纹快照做预筛，
+  再以自研回溯同构确认做精确判等（WL 预筛可能存在假阳性，
+  但不会把真正相等的结构判为不等）。采用严格判等：
+  普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
+- 指纹快照契约：结构指纹是快照，编辑完成后必须调用 Molecule.update()
+  重新计算；未 update() 时读取 feature 或做 == 判等会抛 ValueError。
+  直接修改 bond.order / atom.charge / pi.dbe 等标量字段属契约外操作。
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
   离域体系一律用 add_pi_bond 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
@@ -49,6 +54,7 @@ class Molecule:
         self.atoms: list[Atom] = []
         self.bonds: list[Bond] = []
         self.pi_systems: list[PiSystem] = []
+        self._feature_cache: list[str] | None = None  # update() 后生效的指纹快照
 
     # ---- 派生数据（全部现算，不存储） ----
 
@@ -109,7 +115,7 @@ class Molecule:
         - 价键：每个原子的 used_valence 不超过其价键数；
         - π 体系：成员 >= 2、无重复、连通、成员间无显式多重键、
           每原子至多参与一个 π 体系、单价元素不参与。
-        指纹计算（feature / __eq__）与 unsaturation 前会自动调用。
+        update() 与 unsaturation 计算前会自动调用。
         """
         _check_containers(self)
         for atom in self.atoms:
@@ -128,15 +134,38 @@ class Molecule:
                 if participation[atom] > 1:
                     raise ValueError(f"{atom.name} 原子已参与多个 π 体系")
 
+    def update(self) -> None:
+        """校验结构并重算结构指纹快照。
+
+        编辑完成后必须调用；未 update() 时读取 feature 或做 == 判等
+        会抛 ValueError。直接修改 bond.order / atom.charge / pi.dbe
+        等标量字段属契约外操作，修改后同样需要重新 update()。
+        """
+        self.validate()
+        self._feature_cache = _fingerprint(self)
+
     @property
     def feature(self) -> list[str]:
-        """结构指纹（与建键顺序无关），用于分子相等判断。"""
-        return _fingerprint(self)
+        """结构指纹快照（与建键顺序无关），update() 后可用。
+
+        返回防御性拷贝：外部修改返回值不影响内部缓存。
+        """
+        if self._feature_cache is None:
+            raise ValueError("请先调用 update()")
+        return list(self._feature_cache)
 
     # ---- 内置方法 ----
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Molecule) and self.feature == other.feature
+        """精确结构判等：WL 指纹快照预筛 + 回溯同构确认。
+
+        双方都必须先调用 update()，否则抛 ValueError。
+        """
+        if not isinstance(other, Molecule):
+            return False
+        if self.feature != other.feature:
+            return False
+        return _are_isomorphic(self, other)
 
     # 注意：Molecule 定义了 __eq__ 且结构可变，因此不定义 __hash__，
     # Python 会自动令其实例不可哈希；需要作集合/字典键时用 tuple(molecule.feature)。
@@ -500,11 +529,8 @@ def _digest(value: object) -> str:
     return hashlib.md5(repr(value).encode('utf-8')).hexdigest()
 
 
-def _fingerprint(molecule: Molecule) -> list[str]:
-    """返回排序后的稳定指纹列表：与建键顺序无关，可作相等判断。"""
-    if not molecule.atoms:
-        return []
-    molecule.validate()
+def _wl_labels(molecule: Molecule) -> dict[Atom, AtomLabel]:
+    """WL 迭代细化：返回每个原子的最终标签（颜色），供指纹与同构剪枝使用。"""
     labels: dict[Atom, AtomLabel] = {atom: _initial_label(atom) for atom in molecule.atoms}
     for _ in range(len(molecule.atoms)):
         new_labels: dict[Atom, AtomLabel] = {
@@ -514,11 +540,138 @@ def _fingerprint(molecule: Molecule) -> list[str]:
             labels = new_labels
             break
         labels = new_labels
+    return labels
+
+
+def _fingerprint(molecule: Molecule) -> list[str]:
+    """返回排序后的稳定指纹列表：与建键顺序无关，作相等判断的预筛输入。"""
+    if not molecule.atoms:
+        return []
+    molecule.validate()
+    labels = _wl_labels(molecule)
     header = _digest((
         len(molecule.atoms), len(molecule.bonds),
         molecule.unsaturation, len(molecule.pi_systems),
     ))
     return [header] + sorted(_digest(labels[atom]) for atom in molecule.atoms)
+
+
+def _build_adjacency(molecule: Molecule) -> dict[Atom, dict[Atom, tuple[int, ...]]]:
+    """邻接表：端点对 -> 有序键级列表（防御直接构造造成的平行键）。"""
+    neighbors: dict[Atom, dict[Atom, list[int]]] = {atom: {} for atom in molecule.atoms}
+    for bond in molecule.bonds:
+        atom1, atom2 = bond.atoms
+        neighbors[atom1].setdefault(atom2, []).append(bond.order)
+        neighbors[atom2].setdefault(atom1, []).append(bond.order)
+    return {
+        atom: {other: tuple(sorted(orders)) for other, orders in table.items()}
+        for atom, table in neighbors.items()
+    }
+
+
+def _pi_index(molecule: Molecule) -> dict[Atom, tuple[int, int]]:
+    """原子 -> (所属 π 体系序号, dbe)；未参与 π 体系的原子不在结果中。
+
+    前置条件：结构已通过 validate()，每原子至多参与一个 π 体系。
+    """
+    atom_pi: dict[Atom, tuple[int, int]] = {}
+    for index, pi in enumerate(molecule.pi_systems):
+        for atom in pi.atoms:
+            atom_pi[atom] = (index, pi.dbe)
+    return atom_pi
+
+
+def _are_isomorphic(m1: Molecule, m2: Molecule) -> bool:
+    """精确同构判断：WL 颜色剪枝 + VF2 风格回溯确认。
+
+    保持顶点标签（元素 / 形式电荷 / 是否 ActiveH）、键级、π 体系
+    （dbe 与成员集合）三者一致；供 __eq__ 在 WL 预筛通过后做精确确认。
+    """
+    m1.validate()
+    m2.validate()
+    if not m1.atoms:
+        return not m2.atoms
+    if (len(m1.atoms), len(m1.bonds), len(m1.pi_systems)) != (
+            len(m2.atoms), len(m2.bonds), len(m2.pi_systems)):
+        return False
+
+    colors1 = _wl_labels(m1)
+    colors2 = _wl_labels(m2)
+    if sorted(colors1.values()) != sorted(colors2.values()):
+        return False
+
+    adj1 = _build_adjacency(m1)
+    adj2 = _build_adjacency(m2)
+    atom_pi1 = _pi_index(m1)
+    atom_pi2 = _pi_index(m2)
+
+    mapping: dict[Atom, Atom] = {}
+    matched2: set[Atom] = set()
+    sys_map: dict[int, int] = {}      # m1 体系序号 -> m2 体系序号
+    sys_map_rev: dict[int, int] = {}  # m2 体系序号 -> m1 体系序号
+
+    def feasible(v1: Atom, w: Atom) -> bool:
+        """候选 w 是否可与 v1 配对（基于已匹配映射）。"""
+        if _initial_label(v1) != _initial_label(w):
+            return False
+        if colors1[v1] != colors2[w]:
+            return False
+        p1 = atom_pi1.get(v1)
+        p2 = atom_pi2.get(w)
+        if p1 is None:
+            if p2 is not None:
+                return False
+        else:
+            if p2 is None or p1[1] != p2[1]:
+                return False
+            if p1[0] in sys_map:
+                if sys_map[p1[0]] != p2[0]:
+                    return False
+            elif p2[0] in sys_map_rev:
+                return False
+        for u1, u2 in mapping.items():
+            if adj1[v1].get(u1, ()) != adj2[w].get(u2, ()):
+                return False
+        return True
+
+    def backtrack() -> bool:
+        if len(mapping) == len(m1.atoms):
+            return True
+        # fail-first：每次选候选集最小的未匹配顶点
+        best_v1: Atom | None = None
+        best_candidates: list[Atom] = []
+        for v1 in m1.atoms:
+            if v1 in mapping:
+                continue
+            candidates = [w for w in m2.atoms if w not in matched2 and feasible(v1, w)]
+            if not candidates:
+                return False
+            if best_v1 is None or len(candidates) < len(best_candidates):
+                best_v1 = v1
+                best_candidates = candidates
+                if len(candidates) == 1:
+                    break
+        assert best_v1 is not None
+        for w in best_candidates:
+            p1 = atom_pi1.get(best_v1)
+            p2 = atom_pi2.get(w)
+            added_pair: tuple[int, int] | None = None
+            if p1 is not None and p1[0] not in sys_map:
+                added_pair = (p1[0], p2[0])
+                sys_map[added_pair[0]] = added_pair[1]
+                sys_map_rev[added_pair[1]] = added_pair[0]
+            mapping[best_v1] = w
+            matched2.add(w)
+            if backtrack():
+                return True
+            matched2.remove(w)
+            del mapping[best_v1]
+            if added_pair is not None:
+                del sys_map[added_pair[0]]
+                del sys_map_rev[added_pair[1]]
+        return False
+
+    return backtrack()
 
 
 def _display_formula(formula: dict[str, int]) -> str:
