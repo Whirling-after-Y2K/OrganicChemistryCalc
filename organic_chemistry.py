@@ -18,6 +18,8 @@
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
   离域体系一律用 add_pi_system 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
+- 硝基型 [N,O,O] π 体系中的 N 允许 4 个价键槽位（等效 N⁺ 的 4 键表示）；
+  硝基一律用 3 个单键 + PiSystem 表示，显式 N=O 双键画法仍不允许。
 """
 
 from __future__ import annotations
@@ -217,10 +219,10 @@ class Atom:
 
     @property
     def implicit_h(self) -> int:
-        """隐氢数 = 价键数 - 已占用价键数；单价元素不计隐氢（空槽位为自由基）。"""
+        """隐氢数 = 价键容量 - 已占用价键数；单价元素不计隐氢（空槽位为自由基）。"""
         if CHEMISTRY_BOND_DICT[self.name] < 2:
             return 0
-        return max(0, CHEMISTRY_BOND_DICT[self.name] - self.used_valence)
+        return max(0, _valence_limit(self) - self.used_valence)
 
     def __repr__(self) -> str:
         return f"<Atom {self.name}>"
@@ -306,9 +308,30 @@ def _find_bond(atom1: Atom, atom2: Atom) -> Bond | None:
     return None
 
 
-def _check_valence(atom: Atom, delta: int) -> None:
-    used = atom.used_valence + delta
+def _is_nitro_pi(atoms: list[Atom]) -> bool:
+    """是否为硝基型 π 体系：3 个成员且恰好 1 个 n、2 个 o（按组成判定）。"""
+    if len(atoms) != 3:
+        return False
+    counts: dict[str, int] = {}
+    for atom in atoms:
+        counts[atom.name] = counts.get(atom.name, 0) + 1
+    return counts.get('n') == 1 and counts.get('o') == 2
+
+
+def _valence_limit(atom: Atom) -> int:
+    """原子的价键容量：基础价；硝基型 π 体系中的 n 额外 +1（等效 N⁺ 的 4 键）。"""
     limit = CHEMISTRY_BOND_DICT[atom.name]
+    if atom.name == 'n':
+        for pi in atom.belong.pi_systems:
+            if atom in pi.atoms and _is_nitro_pi(pi.atoms):
+                limit += 1
+                break
+    return limit
+
+
+def _check_valence(atom: Atom, delta: int, extra: int = 0) -> None:
+    used = atom.used_valence + delta
+    limit = _valence_limit(atom) + extra
     if used > limit:
         raise ValueError(f"{atom.name} 原子价键数不足：需要 {used}，最多 {limit}")
 
@@ -452,6 +475,9 @@ def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
 
     校验顺序：成员数 ≥ 2 → 同分子 → 单价元素拒绝 → 无重复成员 →
     成员间无显式多重键 → 每原子最多参与一个 π 体系 → 价键容量。
+    价键容量按 _valence_limit 计算：硝基型 [N,O,O] 中的 N 允许 4 个槽位
+    （等效 N⁺），其余场合不豁免；硝基请用 3 个单键 + 本函数表示，
+    显式 N=O 双键画法仍不允许。
     成员连通性在 Molecule.validate()（指纹计算前）统一校验，
     以允许"先建 π 体系、后补完 σ 骨架"的增量构建。
     """
@@ -470,8 +496,9 @@ def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     for atom in atom_list:
         if any(atom in pi.atoms for pi in molecule.pi_systems):
             raise ValueError(f"{atom.name} 原子已参与其他 π 体系")
+    nitro_extra = 1 if _is_nitro_pi(atom_list) else 0
     for atom in atom_list:
-        _check_valence(atom, 1)
+        _check_valence(atom, 1, extra=nitro_extra if atom.name == 'n' else 0)
     pi = PiSystem(atom_list, dbe=dbe)
     molecule.pi_systems.append(pi)
     molecule._invalidate()
