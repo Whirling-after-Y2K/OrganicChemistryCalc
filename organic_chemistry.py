@@ -11,10 +11,10 @@
   但不会把真正相等的结构判为不等）。采用严格判等：
   普通显式 H 与隐氢视为不同结构，活性 H 参与指纹。
 - 指纹快照契约：结构指纹是快照，任何编辑操作（建/断键、增删 π 体系、
-  增删原子等）会自动失效快照；失效后必须调用 Molecule.update() 重算，
-  否则读取 feature 或做 == 判等会抛 ValueError。直接修改
-  bond.order / atom.charge / pi.dbe 等标量字段属契约外操作，
-  修改后同样需要手动 update()。
+  增删原子等）会自动失效快照；失效后读取 feature 或做 == 判等会自动
+  校验并重算（惰性重建），也可显式调用 Molecule.update() 提前校验。
+  直接修改 bond.order / atom.charge / pi.dbe 等标量字段属契约外操作，
+  修改后同样会在下次读取时自动重建（或手动 update()）。
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
   离域体系一律用 add_pi_system 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
@@ -69,7 +69,7 @@ class Molecule:
         self._snapshot: _FingerprintSnapshot | None = None  # update() 后生效的指纹快照
 
     def _invalidate(self) -> None:
-        """编辑后失效指纹快照；下次读取 feature / == 判等前必须 update()。"""
+        """编辑后失效指纹快照；下次读取 feature / == 判等时自动重算。"""
         self._snapshot = None
 
     # ---- 派生数据（全部现算，不存储） ----
@@ -130,7 +130,7 @@ class Molecule:
         - 价键：每个原子的 used_valence 不超过其价键数；
         - π 体系：成员 >= 2、无重复、连通、成员间无显式多重键、
           每原子至多参与一个 π 体系、单价元素不参与。
-        update() 与 unsaturation 计算前会自动调用。
+        update()、读取 feature / 判等与 unsaturation 计算前会自动调用。
         """
         _check_containers(self)
         for atom in self.atoms:
@@ -152,22 +152,25 @@ class Molecule:
     def update(self) -> None:
         """校验结构并重算结构指纹快照。
 
-        任何编辑操作会自动失效快照；失效后必须调用 update()，
-        未 update() 时读取 feature 或做 == 判等会抛 ValueError。
+        编辑操作会自动失效快照；读取 feature 或做 == 判等时会自动
+        校验并重算（惰性重建）。本方法是可选的显式入口：需要提前
+        校验（fail-fast）或主动刷新快照时调用；无效结构抛 ValueError。
         直接修改 bond.order / atom.charge / pi.dbe 等标量字段属
-        契约外操作，修改后同样需要重新 update()。
+        契约外操作，修改后同样会在下次读取时自动重建。
         """
         self.validate()
         self._snapshot = _build_snapshot(self)
 
     @property
     def feature(self) -> list[str]:
-        """结构指纹快照（与建键顺序无关），update() 后可用。
+        """结构指纹快照（与建键顺序无关）；快照过期时自动校验并重算。
 
         返回防御性拷贝：外部修改返回值不影响内部缓存。
+        无效结构在自动重算时抛 ValueError。
         """
         if self._snapshot is None:
-            raise ValueError("请先调用 update()")
+            self.update()
+        assert self._snapshot is not None
         return list(self._snapshot.feature)
 
     # ---- 内置方法 ----
@@ -175,7 +178,7 @@ class Molecule:
     def __eq__(self, other: object) -> bool:
         """精确结构判等：WL 指纹快照预筛 + 回溯同构确认。
 
-        双方都必须先调用 update()，否则抛 ValueError。
+        双方快照过期时自动校验并重算；无效结构抛 ValueError。
         """
         if not isinstance(other, Molecule):
             return False
