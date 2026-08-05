@@ -657,6 +657,7 @@ def _are_isomorphic(m1: Molecule, m2: Molecule) -> bool:
             p2 = atom_pi2.get(w)
             added_pair: tuple[int, int] | None = None
             if p1 is not None and p1[0] not in sys_map:
+                assert p2 is not None  # feasible() 已保证：p1 非 None 时 p2 必非 None
                 added_pair = (p1[0], p2[0])
                 sys_map[added_pair[0]] = added_pair[1]
                 sys_map_rev[added_pair[1]] = added_pair[0]
