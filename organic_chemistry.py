@@ -514,9 +514,11 @@ def del_atom(atom: Atom) -> None:
 def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
     """将一串原子用单键顺序相连；is_cyclization 为真时首尾相连成环（至少 3 个原子）。
 
-    原子性：先对整个连接序列做累积预校验（同分子、非自环、键级上限、
-    π 体系公约、价键容量），全部通过后再统一建键/升键级；
+    原子性：先对整个连接序列做累积预校验（同分子、非自环、同一原子对不重复、
+    键级上限、π 体系公约、价键容量），全部通过后再统一建键/升键级；
     任一步失败都不会留下部分键或部分升键。
+    序列中的原子应互异（同一无序原子对至多出现一次）；双键请用 add_bond 升级，
+    不要通过重复连接同一对原子表达。
     """
     if len(target_atom_list) < 2:
         raise ValueError("至少需要两个原子")
@@ -532,7 +534,12 @@ def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
     # 预校验：模拟整段连接对每个原子价键与已有键键级的累积占用
     pending_valence: dict[Atom, int] = {}
     pending_upgrade: dict[Bond, int] = {}
+    seen_pairs: set[frozenset[Atom]] = set()
     for atom1, atom2 in pairs:
+        pair = frozenset((atom1, atom2))
+        if pair in seen_pairs:
+            raise ValueError("连接序列中同一对原子不能重复出现")
+        seen_pairs.add(pair)
         if atom1.belong is not atom2.belong:
             raise ValueError("不能连接不同分子的原子")
         if atom1 is atom2:
