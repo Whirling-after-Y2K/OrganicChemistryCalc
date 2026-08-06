@@ -13,8 +13,10 @@
 - 指纹快照契约：结构指纹是快照，任何编辑操作（建/断键、增删 π 体系、
   增删原子等）会自动失效快照；失效后读取 feature 或做 == 判等会自动
   校验并重算（惰性重建），也可显式调用 Molecule.update() 提前校验。
-  直接修改 bond.order / atom.charge / pi.dbe 等标量字段属契约外操作，
-  修改后同样会在下次读取时自动重建（或手动 update()）。
+  直接修改 bond.order / atom.charge / pi.dbe 等标量属性、以及直接构造
+  Bond / PiSystem 均属非法操作，一律抛 ValueError；所有结构变更必须
+  通过编辑 API（add_bond / break_bond / add_pi_system / remove_pi_system /
+  add_active_h / del_atom）进行。
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
   离域体系一律用 add_pi_system 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
@@ -155,8 +157,8 @@ class Molecule:
         编辑操作会自动失效快照；读取 feature 或做 == 判等时会自动
         校验并重算（惰性重建）。本方法是可选的显式入口：需要提前
         校验（fail-fast）或主动刷新快照时调用；无效结构抛 ValueError。
-        直接修改 bond.order / atom.charge / pi.dbe 等标量字段属
-        契约外操作，修改后同样会在下次读取时自动重建。
+        直接修改 bond.order / atom.charge / pi.dbe 等标量属性、
+        以及直接构造 Bond / PiSystem 属非法操作，会抛 ValueError。
         """
         self.validate()
         self._snapshot = _build_snapshot(self)
@@ -202,16 +204,27 @@ class Molecule:
 class Atom:
     """原子：只记录身份与连接关系，特征全部派生。"""
 
+    _charge: int  # 形式电荷（预留：不影响价态/分子式，当前仅参与判等指纹）
+
     def __init__(self, name: str, molecule: Molecule) -> None:
         name = name.lower()
         if name not in CHEMISTRY_BOND_DICT:
             raise ValueError(f"{name} 不是可成键元素：{sorted(CHEMISTRY_BOND_DICT)}")
         self.name: ElementName = cast(ElementName, name)
         self.bonds: list[Bond] = []   # 参与的所有键（Bond 对象）
-        self.charge: int = 0          # 形式电荷（预留：不影响价态/分子式，当前仅参与判等指纹）
+        self._charge: int = 0         # 形式电荷（预留：不影响价态/分子式，当前仅参与判等指纹）
         self.belong: Molecule = molecule
         molecule.atoms.append(self)
         molecule._invalidate()
+
+    @property
+    def charge(self) -> int:
+        """形式电荷（预留：不影响价态/分子式，当前仅参与判等指纹）。只读。"""
+        return self._charge
+
+    @charge.setter
+    def charge(self, value: int) -> None:
+        raise ValueError("形式电荷暂不处理：禁止直接修改 atom.charge")
 
     @property
     def used_valence(self) -> int:
@@ -243,7 +256,16 @@ class ActiveH(Atom):
 
 
 class Bond:
-    """键：一等对象，两个端点 + 键级 + 预留的立体化学字段。"""
+    """键：一等对象，两个端点 + 键级 + 预留的立体化学字段。
+
+    禁止直接构造：必须通过 add_bond() 创建；order/stereo/aromatic
+    为只读属性，直接修改会抛 ValueError。
+    """
+
+    _atoms: tuple[Atom, Atom]
+    _order: int
+    _stereo: str | None
+    _aromatic: bool
 
     def __init__(
         self,
@@ -253,29 +275,81 @@ class Bond:
         stereo: str | None = None,
         aromatic: bool = False,
     ) -> None:
-        if atom1 is atom2:
-            raise ValueError("原子不能与自身成键")
-        if atom1.belong is not atom2.belong:
-            raise ValueError("不能连接不同分子的原子")
-        if not 1 <= order <= MAX_BOND_ORDER:
-            raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
-        self.atoms: tuple[Atom, Atom] = (atom1, atom2)
-        self.order: int = order
-        self.stereo: str | None = stereo   # 预留：顺反异构/立体构型（当前不参与任何计算）
-        self.aromatic: bool = aromatic     # 预留：芳香键标记（当前不参与任何计算；芳香性由 PiSystem 表示）
-        atom1.bonds.append(self)
-        atom2.bonds.append(self)
-        atom1.belong.bonds.append(self)
-        atom1.belong._invalidate()
+        raise ValueError("不允许直接构造 Bond；请使用 add_bond()")
+
+    @property
+    def atoms(self) -> tuple[Atom, Atom]:
+        """键的两个端点。只读。"""
+        return self._atoms
+
+    @atoms.setter
+    def atoms(self, value: tuple[Atom, Atom]) -> None:
+        raise ValueError("键端点不能直接修改；请使用 add_bond()/break_bond()")
+
+    @property
+    def order(self) -> int:
+        """键级。只读，只能通过 add_bond()/break_bond() 修改。"""
+        return self._order
+
+    @order.setter
+    def order(self, value: int) -> None:
+        raise ValueError("键级只能通过 add_bond()/break_bond() 修改")
+
+    @property
+    def stereo(self) -> str | None:
+        """预留：顺反异构/立体构型（当前不参与任何计算）。只读。"""
+        return self._stereo
+
+    @stereo.setter
+    def stereo(self, value: str | None) -> None:
+        raise ValueError("stereo 为预留字段，禁止直接修改")
+
+    @property
+    def aromatic(self) -> bool:
+        """预留：芳香键标记（当前不参与任何计算；芳香性由 PiSystem 表示）。只读。"""
+        return self._aromatic
+
+    @aromatic.setter
+    def aromatic(self, value: bool) -> None:
+        raise ValueError("aromatic 为预留字段，禁止直接修改")
 
     def other(self, atom: Atom) -> Atom:
         """返回键的另一端原子。"""
-        atom1, atom2 = self.atoms
+        atom1, atom2 = self._atoms
         return atom2 if atom is atom1 else atom1
 
     def __repr__(self) -> str:
-        atom1, atom2 = self.atoms
-        return f"<Bond {atom1.name}-{atom2.name} order={self.order}>"
+        atom1, atom2 = self._atoms
+        return f"<Bond {atom1.name}-{atom2.name} order={self._order}>"
+
+
+def _make_bond(
+    atom1: Atom,
+    atom2: Atom,
+    order: int = 1,
+    stereo: str | None = None,
+    aromatic: bool = False,
+) -> Bond:
+    """内部构造器：add_bond() 专用；执行与旧 Bond.__init__ 相同的防御校验。
+
+    不校验价键容量（由 add_bond() 负责）；测试可用它模拟损坏结构。
+    """
+    if atom1 is atom2:
+        raise ValueError("原子不能与自身成键")
+    if atom1.belong is not atom2.belong:
+        raise ValueError("不能连接不同分子的原子")
+    if not 1 <= order <= MAX_BOND_ORDER:
+        raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
+    bond = object.__new__(Bond)
+    bond._atoms = (atom1, atom2)
+    bond._order = order
+    bond._stereo = stereo
+    bond._aromatic = aromatic
+    atom1.bonds.append(bond)
+    atom2.bonds.append(bond)
+    atom1.belong.bonds.append(bond)
+    atom1.belong._invalidate()
+    return bond
 
 
 class PiSystem:
@@ -283,7 +357,12 @@ class PiSystem:
 
     表示公约：离域体系一律用 PiSystem 表示，成员之间只允许单键；
     显式多重键仅表示局域键，不得与 π 体系混用于同一对原子。
+    禁止直接构造：必须通过 add_pi_system() 创建；dbe/aromatic 只读。
     """
+
+    _atoms: list[Atom]
+    _dbe: int
+    _aromatic: bool
 
     def __init__(
         self,
@@ -291,15 +370,53 @@ class PiSystem:
         dbe: int | None = None,
         aromatic: bool = False,
     ) -> None:
-        if len(atoms) < 2:
-            raise ValueError("π 体系至少需要两个原子")
-        self.atoms: list[Atom] = list(atoms)
-        self.dbe: int = _infer_pi_dbe(self.atoms) if dbe is None else dbe
-        self.aromatic: bool = aromatic  # 预留：芳香性标记（当前不参与任何计算）
+        raise ValueError("不允许直接构造 PiSystem；请使用 add_pi_system()")
+
+    @property
+    def atoms(self) -> list[Atom]:
+        """π 体系成员。只读（列表本身仍可原地操作）。"""
+        return self._atoms
+
+    @atoms.setter
+    def atoms(self, value: list[Atom]) -> None:
+        raise ValueError("π 体系成员不能直接重新绑定；请使用 add_pi_system()/remove_pi_system()")
+
+    @property
+    def dbe(self) -> int:
+        """不饱和度贡献。只读，创建时由 add_pi_system() 指定。"""
+        return self._dbe
+
+    @dbe.setter
+    def dbe(self, value: int) -> None:
+        raise ValueError("dbe 只能在 add_pi_system() 创建时指定")
+
+    @property
+    def aromatic(self) -> bool:
+        """预留：芳香性标记（当前不参与任何计算）。只读。"""
+        return self._aromatic
+
+    @aromatic.setter
+    def aromatic(self, value: bool) -> None:
+        raise ValueError("aromatic 为预留字段，禁止直接修改")
 
     def __repr__(self) -> str:
-        names = ','.join(atom.name for atom in self.atoms)
-        return f"<PiSystem({names}) dbe={self.dbe}>"
+        names = ','.join(atom.name for atom in self._atoms)
+        return f"<PiSystem({names}) dbe={self._dbe}>"
+
+
+def _make_pi_system(
+    atoms: list[Atom],
+    dbe: int | None = None,
+    aromatic: bool = False,
+) -> PiSystem:
+    """内部构造器：add_pi_system() 专用；保留成员数防御校验。"""
+    if len(atoms) < 2:
+        raise ValueError("π 体系至少需要两个原子")
+    pi = object.__new__(PiSystem)
+    pi._atoms = list(atoms)
+    pi._dbe = _infer_pi_dbe(pi._atoms) if dbe is None else dbe
+    pi._aromatic = aromatic
+    return pi
 
 
 # ------- 构建与编辑操作 -------
@@ -364,13 +481,13 @@ def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
         _check_multiple_bond_within_pi(atom1, atom2, new_order)
         _check_valence(atom1, order)
         _check_valence(atom2, order)
-        bond.order = new_order
+        bond._order = new_order
         atom1.belong._invalidate()
         return bond
     _check_multiple_bond_within_pi(atom1, atom2, order)
     _check_valence(atom1, order)
     _check_valence(atom2, order)
-    return Bond(atom1, atom2, order)
+    return _make_bond(atom1, atom2, order)
 
 
 def break_bond(atom1: Atom, atom2: Atom, order: int = 0) -> None:
@@ -385,7 +502,7 @@ def break_bond(atom1: Atom, atom2: Atom, order: int = 0) -> None:
     if bond is None:
         raise ValueError("两个原子之间不存在键")
     if order > 0 and bond.order - order >= 1:
-        bond.order -= order
+        bond._order -= order
         atom1.belong._invalidate()
         return
     molecule = atom1.belong
@@ -502,7 +619,7 @@ def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     nitro_extra = 1 if _is_nitro_pi(atom_list) else 0
     for atom in atom_list:
         _check_valence(atom, 1, extra=nitro_extra if atom.name == 'n' else 0)
-    pi = PiSystem(atom_list, dbe=dbe)
+    pi = _make_pi_system(atom_list, dbe=dbe)
     molecule.pi_systems.append(pi)
     molecule._invalidate()
     return pi
