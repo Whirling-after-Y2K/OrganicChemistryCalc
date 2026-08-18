@@ -20,6 +20,8 @@
 - 表示公约：显式多重键仅表示局域键；同一 π 体系成员之间只允许单键，
   离域体系一律用 add_pi_system 创建 PiSystem 表示，不得用多重键代替。
   违反该公约视为无效结构，在编辑、validate() 与派生性质计算时抛 ValueError。
+- 苯环约定：凯库勒式（环内交替单双键）与鲍林式（六根单键 + PiSystem）
+  两种画法完全等价；构建时检测到交替六元碳环会自动归一化为单键 + PiSystem。
 - 硝基型 [N,O,O] π 体系中的 N 允许 4 个价键槽位（等效 N⁺ 的 4 键表示）；
   硝基一律用 3 个单键 + PiSystem 表示，显式 N=O 双键画法仍不允许。
 """
@@ -471,7 +473,8 @@ def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
     """在 atom1 与 atom2 之间建立键；若已存在则提升键级。
 
     表示公约：同一 π 体系成员之间只允许单键；离域体系请用 add_pi_system，
-    不要用显式多重键代替。
+    不要用显式多重键代替。苯环例外：凯库勒式（环内交替单双键）成形时
+    自动归一化为单键 + PiSystem，与隐式画法等价。
     """
     bond = _find_bond(atom1, atom2)
     if bond is not None:
@@ -483,11 +486,14 @@ def add_bond(atom1: Atom, atom2: Atom, order: int = 1) -> Bond:
         _check_valence(atom2, order)
         bond._order = new_order
         atom1.belong._invalidate()
+        _normalize_benzene_rings(atom1.belong)
         return bond
     _check_multiple_bond_within_pi(atom1, atom2, order)
     _check_valence(atom1, order)
     _check_valence(atom2, order)
-    return _make_bond(atom1, atom2, order)
+    result = _make_bond(atom1, atom2, order)
+    _normalize_benzene_rings(atom1.belong)
+    return result
 
 
 def break_bond(atom1: Atom, atom2: Atom, order: int = 0) -> None:
@@ -598,6 +604,8 @@ def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     价键容量按 _valence_limit 计算：硝基型 [N,O,O] 中的 N 允许 4 个槽位
     （等效 N⁺），其余场合不豁免；硝基请用 3 个单键 + 本函数表示，
     显式 N=O 双键画法仍不允许。
+    苯环特判：成员恰好为交替六元碳环（凯库勒式）时自动降环内双键并继续，
+    显式画法与隐式画法等价。
     成员连通性在 Molecule.validate()（指纹计算前）统一校验，
     以允许"先建 π 体系、后补完 σ 骨架"的增量构建。
     """
@@ -612,7 +620,11 @@ def add_pi_system(atom_list: list[Atom], dbe: int | None = None) -> PiSystem:
     if len(set(atom_list)) != len(atom_list):
         raise ValueError("π 体系成员不能重复")
     if _members_have_multiple_bond(atom_list):
-        raise ValueError("π 体系成员之间已存在显式多重键")
+        # 苯环特判：恰为一个凯库勒式交替环时，先降环内双键再按隐式画法继续
+        if _is_benzene_ring_atom_list(atom_list):
+            _lower_ring_double_bonds(atom_list)
+        else:
+            raise ValueError("π 体系成员之间已存在显式多重键")
     for atom in atom_list:
         if any(atom in pi.atoms for pi in molecule.pi_systems):
             raise ValueError(f"{atom.name} 原子已参与其他 π 体系")
@@ -725,6 +737,143 @@ def _infer_pi_dbe(atoms: list[Atom]) -> int:
     if element_counts.get('n') == 1 and element_counts.get('o') == 2 and len(atoms) == 3:
         return 1
     return 1
+
+
+def _find_benzene_rings(molecule: Molecule) -> list[tuple[Atom, ...]]:
+    """枚举凯库勒式苯环：6 个碳构成的交替单双键简单环。
+
+    以环中 id 最小的原子为起点做 DFS，枚举长度 6 的简单环（每环恰好枚举一次），
+    返回有序原子元组；环边为相邻原子对加首尾原子对。
+    """
+    rings: list[tuple[Atom, ...]] = []
+    seen: set[frozenset[Atom]] = set()
+    for start in molecule.atoms:
+        if start.name != 'c':
+            continue
+        path: list[Atom] = [start]
+        start_id = id(start)
+
+        def visit() -> None:
+            if len(path) == 6:
+                last = path[-1]
+                closing = _find_bond(last, start)
+                if closing is None:
+                    return
+                orders: list[int] = []
+                for i in range(5):
+                    bond = _find_bond(path[i], path[i + 1])
+                    assert bond is not None
+                    orders.append(bond.order)
+                orders.append(closing.order)
+                # 交替判定：偶数位键级相同、奇数位键级相同，且两者不同
+                if orders[0] == orders[1] or any(
+                        orders[i] != orders[i % 2] for i in range(6)):
+                    return
+                ring_set = frozenset(path)
+                if ring_set in seen:
+                    return
+                # 无弦校验：环内每个原子恰好 2 条环内键
+                for atom in path:
+                    ring_neighbors = sum(
+                        1 for bond in atom.bonds if bond.other(atom) in ring_set
+                    )
+                    if ring_neighbors != 2:
+                        return
+                seen.add(ring_set)
+                rings.append(tuple(path))
+                return
+            current = path[-1]
+            for bond in current.bonds:
+                neighbor = bond.other(current)
+                if neighbor is start and len(path) > 1:
+                    continue
+                if neighbor.name != 'c' or id(neighbor) <= start_id:
+                    continue
+                if neighbor in path:
+                    continue
+                path.append(neighbor)
+                visit()
+                path.pop()
+
+        visit()
+    return rings
+
+
+def _lower_ring_double_bonds(ring: list[Atom] | tuple[Atom, ...]) -> None:
+    """把环内双键降为单键（凯库勒式 → 单键骨架）。"""
+    for i in range(len(ring)):
+        bond = _find_bond(ring[i], ring[(i + 1) % len(ring)])
+        assert bond is not None
+        if bond.order > 1:
+            bond._order = 1
+
+
+def _is_benzene_ring_atom_list(atom_list: list[Atom]) -> bool:
+    """atom_list 是否恰好构成一个凯库勒式苯环（交替六元碳环）。"""
+    if len(atom_list) != 6:
+        return False
+    target = frozenset(atom_list)
+    molecule = atom_list[0].belong
+    return any(frozenset(ring) == target for ring in _find_benzene_rings(molecule))
+
+
+def _normalize_benzene_rings(molecule: Molecule) -> None:
+    """构建时归一化：把凯库勒式苯环转成隐式表示（单键骨架 + PiSystem）。
+
+    共享原子的交替环（稠环）合并为一个 π 体系，dbe 沿用 _infer_pi_dbe；
+    与已有真实 π 体系共享原子的环（病态状态）跳过，不自动转换。
+    """
+    rings = _find_benzene_rings(molecule)
+    if not rings:
+        return
+    parent = list(range(len(rings)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for i in range(len(rings)):
+        ring_i = set(rings[i])
+        for j in range(i + 1, len(rings)):
+            if ring_i & set(rings[j]):
+                union(i, j)
+
+    groups: dict[int, list[tuple[Atom, ...]]] = {}
+    for index, ring in enumerate(rings):
+        groups.setdefault(find(index), []).append(ring)
+
+    changed = False
+    for group in groups.values():
+        atoms: list[Atom] = []
+        seen_atoms: set[Atom] = set()
+        edges: set[frozenset[Atom]] = set()
+        for ring in group:
+            for i in range(len(ring)):
+                atom_a, atom_b = ring[i], ring[(i + 1) % len(ring)]
+                edges.add(frozenset((atom_a, atom_b)))
+                if atom_a not in seen_atoms:
+                    seen_atoms.add(atom_a)
+                    atoms.append(atom_a)
+        # 病态状态：与真实 π 体系重叠时交由 validate 报错，不自动转换
+        if any(any(atom in pi.atoms for pi in molecule.pi_systems) for atom in atoms):
+            continue
+        for edge in edges:
+            atom_a, atom_b = tuple(edge)
+            bond = _find_bond(atom_a, atom_b)
+            if bond is not None and bond.order > 1:
+                bond._order = 1
+                changed = True
+        molecule.pi_systems.append(_make_pi_system(atoms, dbe=_infer_pi_dbe(atoms)))
+        changed = True
+    if changed:
+        molecule._invalidate()
 
 
 def _initial_label(atom: Atom) -> Label:
@@ -1145,6 +1294,81 @@ def _check_pattern(pattern: Pattern) -> None:
         _check_pattern_order(bond.order)
 
 
+def _find_pattern_benzene_rings(pattern: Pattern) -> set[frozenset[PatternAtom]]:
+    """检测模式中的凯库勒式苯环，返回环内键的端点对集合。
+
+    仅精确键级（int）参与交替判定；命中的环内键在匹配时统一按单键处理，
+    使凯库勒式苯环模式与隐式（单键 + π 体系）目标互相匹配。
+    非苯环双键（如羰基 C=O）不受影响，仍严格匹配。
+    """
+    adjacency: dict[PatternAtom, list[tuple[PatternAtom, int]]] = {
+        atom: [] for atom in pattern.atoms
+    }
+    for bond in pattern.bonds:
+        if not isinstance(bond.order, int):
+            continue
+        adjacency[bond.atom1].append((bond.atom2, bond.order))
+        adjacency[bond.atom2].append((bond.atom1, bond.order))
+    edges: set[frozenset[PatternAtom]] = set()
+    seen: set[frozenset[PatternAtom]] = set()
+    for start in pattern.atoms:
+        if start.element != 'c':
+            continue
+        path: list[PatternAtom] = [start]
+        start_id = id(start)
+
+        def visit() -> None:
+            if len(path) == 6:
+                last = path[-1]
+                closing = next(
+                    (order for neighbor, order in adjacency[last] if neighbor is start),
+                    None,
+                )
+                if closing is None:
+                    return
+                orders: list[int] = []
+                for i in range(5):
+                    order = next(
+                        order for neighbor, order in adjacency[path[i]]
+                        if neighbor is path[i + 1]
+                    )
+                    orders.append(order)
+                orders.append(closing)
+                # 交替判定：偶数位键级相同、奇数位键级相同，且两者不同
+                if orders[0] == orders[1] or any(
+                        orders[i] != orders[i % 2] for i in range(6)):
+                    return
+                ring_set = frozenset(path)
+                if ring_set in seen:
+                    return
+                # 无弦校验：环内每个原子恰好 2 条环内键
+                for atom in path:
+                    ring_neighbors = sum(
+                        1 for neighbor, _ in adjacency[atom]
+                        if neighbor in ring_set
+                    )
+                    if ring_neighbors != 2:
+                        return
+                seen.add(ring_set)
+                for i in range(6):
+                    edges.add(frozenset((path[i], path[(i + 1) % 6])))
+                return
+            current = path[-1]
+            for neighbor, _ in adjacency[current]:
+                if neighbor is start and len(path) > 1:
+                    continue
+                if neighbor.element != 'c' or id(neighbor) <= start_id:
+                    continue
+                if neighbor in path:
+                    continue
+                path.append(neighbor)
+                visit()
+                path.pop()
+
+        visit()
+    return edges
+
+
 def find_substructure_matches(
     pattern: Pattern,
     molecule: Molecule,
@@ -1160,6 +1384,7 @@ def find_substructure_matches(
     if limit is not None and limit < 1:
         raise ValueError("limit 必须 >= 1")
     _check_pattern(pattern)
+    pattern_ring_edges = _find_pattern_benzene_rings(pattern)
     molecule.validate()
     if not molecule.atoms:
         return []
@@ -1200,8 +1425,10 @@ def find_substructure_matches(
             p_bond = _pattern_bond_between(pattern, p_atom, other_p)
             if p_bond is None:
                 continue
+            p_order = (1 if frozenset((p_atom, other_p)) in pattern_ring_edges
+                       else p_bond.order)
             order = target_bond_order(atom, other_atom)
-            if order is None or not _order_matches(p_bond.order, order):
+            if order is None or not _order_matches(p_order, order):
                 return False
         return True
 
