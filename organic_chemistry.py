@@ -909,6 +909,392 @@ def _are_isomorphic(
     return backtrack()
 
 
+# ------- 子结构匹配与分子克隆 -------
+
+
+class PatternAtom:
+    """子结构模式中的一个原子。
+
+    element 为 None 时匹配任意元素；h 为精确总氢数，h_min 为最少总氢数（互斥）；
+    pi 为 True/False 时要求目标原子属于/不属于某个 π 体系，None 表示不限；
+    pi_group 非 None 时，同值的模式原子必须落入同一个目标 π 体系。
+    """
+
+    def __init__(
+        self,
+        element: str | None = None,
+        *,
+        h: int | None = None,
+        h_min: int | None = None,
+        pi: bool | None = None,
+        pi_group: int | None = None,
+    ) -> None:
+        if element is not None:
+            element = element.lower()
+            if element not in CHEMISTRY_BOND_DICT:
+                raise ValueError(
+                    f"{element} 不是可匹配的元素：{sorted(CHEMISTRY_BOND_DICT)} 或 None"
+                )
+        if h is not None and h < 0:
+            raise ValueError("h 必须 >= 0")
+        if h_min is not None and h_min < 0:
+            raise ValueError("h_min 必须 >= 0")
+        if h is not None and h_min is not None:
+            raise ValueError("h 与 h_min 不能同时设置")
+        if pi_group is not None and pi_group < 0:
+            raise ValueError("pi_group 必须 >= 0")
+        if pi_group is not None and pi is False:
+            raise ValueError("pi_group 非 None 时 pi 不能为 False")
+        self.element: str | None = element
+        self.h: int | None = h
+        self.h_min: int | None = h_min
+        self.pi: bool | None = pi
+        self.pi_group: int | None = pi_group
+
+    def __repr__(self) -> str:
+        parts = [self.element if self.element is not None else '*']
+        if self.h is not None:
+            parts.append(f'H={self.h}')
+        if self.h_min is not None:
+            parts.append(f'H>={self.h_min}')
+        if self.pi is True:
+            parts.append('pi')
+        elif self.pi is False:
+            parts.append('no-pi')
+        if self.pi_group is not None:
+            parts.append(f'pg{self.pi_group}')
+        return '<PatternAtom ' + ' '.join(parts) + '>'
+
+
+def _check_pattern_order(order: int | tuple[int, ...] | None) -> None:
+    """校验模式键级；非法抛 ValueError。"""
+    if order is None:
+        return
+    if isinstance(order, int):
+        if not 1 <= order <= MAX_BOND_ORDER:
+            raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER}")
+        return
+    if not isinstance(order, tuple):
+        raise ValueError("order 必须为 int、tuple 或 None")
+    if not order:
+        raise ValueError("order 元组不能为空")
+    for value in order:
+        if not isinstance(value, int) or not 1 <= value <= MAX_BOND_ORDER:
+            raise ValueError(f"键级必须为 1-{MAX_BOND_ORDER} 的整数或元组")
+
+
+class PatternBond:
+    """子结构模式中的一条键。
+
+    order 为 None 时匹配任意键级（1-3）；为 int 时精确匹配；为元组时匹配其中任一键级。
+    """
+
+    def __init__(
+        self,
+        atom1: PatternAtom,
+        atom2: PatternAtom,
+        order: int | tuple[int, ...] | None = None,
+    ) -> None:
+        if atom1 is atom2:
+            raise ValueError("模式键不能连接同一个原子（自环）")
+        _check_pattern_order(order)
+        self.atom1: PatternAtom = atom1
+        self.atom2: PatternAtom = atom2
+        self.order: int | tuple[int, ...] | None = order
+
+    def __repr__(self) -> str:
+        return f"<PatternBond {self.atom1}..{self.atom2} order={self.order}>"
+
+
+class Pattern:
+    """子结构模式：一组模式原子与模式键。
+
+    用 add_atom()/add_bond() 构建，构建即校验；匹配时目标分子允许有模式之外的
+    额外键（子结构语义，非诱导子图）。
+    """
+
+    def __init__(self) -> None:
+        self.atoms: list[PatternAtom] = []
+        self.bonds: list[PatternBond] = []
+
+    def add_atom(
+        self,
+        element: str | None = None,
+        *,
+        h: int | None = None,
+        h_min: int | None = None,
+        pi: bool | None = None,
+        pi_group: int | None = None,
+    ) -> PatternAtom:
+        atom = PatternAtom(element, h=h, h_min=h_min, pi=pi, pi_group=pi_group)
+        self.atoms.append(atom)
+        return atom
+
+    def add_bond(
+        self,
+        atom1: PatternAtom,
+        atom2: PatternAtom,
+        order: int | tuple[int, ...] | None = None,
+    ) -> PatternBond:
+        if atom1 not in self.atoms or atom2 not in self.atoms:
+            raise ValueError("模式键的两个端点必须属于该模式")
+        pair = frozenset((atom1, atom2))
+        for bond in self.bonds:
+            if frozenset((bond.atom1, bond.atom2)) == pair:
+                raise ValueError("同一对模式原子之间只能有一条模式键")
+        bond = PatternBond(atom1, atom2, order=order)
+        self.bonds.append(bond)
+        return bond
+
+    def __repr__(self) -> str:
+        return f"<Pattern atoms={len(self.atoms)} bonds={len(self.bonds)}>"
+
+
+class SubstructureMatch:
+    """一次子结构匹配结果。
+
+    atom_map: 模式原子 -> 目标原子；pi_map: pi_group -> 目标 π 体系；
+    atoms: 按 pattern.atoms 顺序排列的目标原子。
+    """
+
+    def __init__(
+        self,
+        atom_map: dict[PatternAtom, Atom],
+        pi_map: dict[int, PiSystem],
+        pattern: Pattern,
+    ) -> None:
+        self.atom_map: dict[PatternAtom, Atom] = dict(atom_map)
+        self.pi_map: dict[int, PiSystem] = dict(pi_map)
+        self.atoms: tuple[Atom, ...] = tuple(atom_map[atom] for atom in pattern.atoms)
+
+    def __repr__(self) -> str:
+        return '<SubstructureMatch ' + ','.join(atom.name for atom in self.atoms) + '>'
+
+
+def _total_h(atom: Atom) -> int:
+    """原子的总氢数 = 隐氢 + 显式 H 邻居数（ActiveH 计入）。"""
+    explicit = sum(1 for bond in atom.bonds if bond.other(atom).name == 'h')
+    return atom.implicit_h + explicit
+
+
+def _atom_pi_system(atom: Atom) -> PiSystem | None:
+    """原子所属的 π 体系（validate 保证至多一个）；未参与时返回 None。"""
+    for pi in atom.belong.pi_systems:
+        if atom in pi.atoms:
+            return pi
+    return None
+
+
+def _atom_matches_pattern(atom: Atom, p_atom: PatternAtom) -> bool:
+    """目标原子是否满足模式原子的元素 / 总氢 / π 约束。"""
+    if p_atom.element is not None and atom.name != p_atom.element:
+        return False
+    total_h = _total_h(atom)
+    if p_atom.h is not None and total_h != p_atom.h:
+        return False
+    if p_atom.h_min is not None and total_h < p_atom.h_min:
+        return False
+    if p_atom.pi is True and _atom_pi_system(atom) is None:
+        return False
+    if p_atom.pi is False and _atom_pi_system(atom) is not None:
+        return False
+    return True
+
+
+def _pattern_bond_between(
+    pattern: Pattern,
+    p1: PatternAtom,
+    p2: PatternAtom,
+) -> PatternBond | None:
+    """两个模式原子之间的模式键（模式保证至多一条）。"""
+    pair = frozenset((p1, p2))
+    for bond in pattern.bonds:
+        if frozenset((bond.atom1, bond.atom2)) == pair:
+            return bond
+    return None
+
+
+def _order_matches(
+    pattern_order: int | tuple[int, ...] | None,
+    target_order: int,
+) -> bool:
+    if pattern_order is None:
+        return True
+    if isinstance(pattern_order, int):
+        return pattern_order == target_order
+    return target_order in pattern_order
+
+
+def _check_pattern(pattern: Pattern) -> None:
+    """校验模式合法性；非法抛 ValueError。"""
+    if not pattern.atoms:
+        raise ValueError("模式至少需要一个原子")
+    if len(set(pattern.atoms)) != len(pattern.atoms):
+        raise ValueError("模式中存在重复原子")
+    atom_set = set(pattern.atoms)
+    seen_pairs: set[frozenset[PatternAtom]] = set()
+    for bond in pattern.bonds:
+        if bond.atom1 not in atom_set or bond.atom2 not in atom_set:
+            raise ValueError("模式键的端点必须属于该模式")
+        if bond.atom1 is bond.atom2:
+            raise ValueError("模式键不能连接同一个原子")
+        pair = frozenset((bond.atom1, bond.atom2))
+        if pair in seen_pairs:
+            raise ValueError("同一对模式原子之间只能有一条模式键")
+        seen_pairs.add(pair)
+        _check_pattern_order(bond.order)
+
+
+def find_substructure_matches(
+    pattern: Pattern,
+    molecule: Molecule,
+    *,
+    limit: int | None = None,
+) -> list[SubstructureMatch]:
+    """在分子中查找所有子结构匹配（子结构语义：目标分子允许模式之外的额外键）。
+
+    匹配前先校验模式与分子结构（无效抛 ValueError）；limit 限制返回数量
+    （None 表示全部，limit=1 等价于“是否存在”）。结果按命中的目标原子集合去重，
+    对称模式（如硝基的两个 O）每个基团位置只算一次。
+    """
+    if limit is not None and limit < 1:
+        raise ValueError("limit 必须 >= 1")
+    _check_pattern(pattern)
+    molecule.validate()
+    if not molecule.atoms:
+        return []
+
+    candidates: dict[PatternAtom, list[Atom]] = {
+        p_atom: [atom for atom in molecule.atoms if _atom_matches_pattern(atom, p_atom)]
+        for p_atom in pattern.atoms
+    }
+    if any(not cand for cand in candidates.values()):
+        return []
+
+    results: list[SubstructureMatch] = []
+    seen_images: set[frozenset[Atom]] = set()
+    assignment: dict[PatternAtom, Atom] = {}
+    used: set[Atom] = set()
+    pi_map: dict[int, PiSystem] = {}
+
+    def target_bond_order(atom1: Atom, atom2: Atom) -> int | None:
+        for bond in atom1.bonds:
+            if bond.other(atom1) is atom2:
+                return bond.order
+        return None
+
+    def feasible(p_atom: PatternAtom, atom: Atom) -> bool:
+        """候选原子是否可与模式原子配对（基于已匹配映射）。"""
+        if atom in used:
+            return False
+        if not _atom_matches_pattern(atom, p_atom):
+            return False
+        if p_atom.pi_group is not None:
+            pi = _atom_pi_system(atom)
+            if pi is None:
+                return False
+            mapped = pi_map.get(p_atom.pi_group)
+            if mapped is not None and mapped is not pi:
+                return False
+        for other_p, other_atom in assignment.items():
+            p_bond = _pattern_bond_between(pattern, p_atom, other_p)
+            if p_bond is None:
+                continue
+            order = target_bond_order(atom, other_atom)
+            if order is None or not _order_matches(p_bond.order, order):
+                return False
+        return True
+
+    def backtrack() -> bool:
+        """返回 True 表示已到 limit，提前终止。"""
+        if len(assignment) == len(pattern.atoms):
+            image = frozenset(assignment.values())
+            if image not in seen_images:
+                seen_images.add(image)
+                results.append(SubstructureMatch(assignment, pi_map, pattern))
+                if limit is not None and len(results) >= limit:
+                    return True
+            return False
+        best_p: PatternAtom | None = None
+        best_candidates: list[Atom] = []
+        for p_atom in pattern.atoms:
+            if p_atom in assignment:
+                continue
+            cand = [atom for atom in candidates[p_atom] if feasible(p_atom, atom)]
+            if not cand:
+                return False
+            if best_p is None or len(cand) < len(best_candidates):
+                best_p = p_atom
+                best_candidates = cand
+                if len(cand) == 1:
+                    break
+        assert best_p is not None
+        for atom in best_candidates:
+            added_group: int | None = None
+            if best_p.pi_group is not None and best_p.pi_group not in pi_map:
+                pi = _atom_pi_system(atom)
+                assert pi is not None  # feasible 已保证
+                pi_map[best_p.pi_group] = pi
+                added_group = best_p.pi_group
+            assignment[best_p] = atom
+            used.add(atom)
+            if backtrack():
+                return True
+            used.remove(atom)
+            del assignment[best_p]
+            if added_group is not None:
+                del pi_map[added_group]
+        return False
+
+    backtrack()
+    return results
+
+
+def molecule_has_substructure(pattern: Pattern, molecule: Molecule) -> bool:
+    """分子是否包含至少一个模式匹配。"""
+    return bool(find_substructure_matches(pattern, molecule, limit=1))
+
+
+def copy_molecule(
+    molecule: Molecule,
+    atom_map: dict[Atom, Atom] | None = None,
+) -> Molecule:
+    """深拷贝分子：新建独立的原子/键/π 体系，结构与原分子相同。
+
+    拷贝前先校验结构（validate），无效结构抛 ValueError。保留 name、ActiveH 子类、
+    键级、π 体系 dbe 与成员顺序；副本 _snapshot 为空（读取时惰性重建），编辑副本
+    不影响原分子。atom_map 非 None 时填入“原原子 -> 副本原子”映射（供反应规则等
+    按原分子定位副本原子）。
+    """
+    molecule.validate()
+    clone = Molecule(name=molecule.name)
+    mapping: dict[Atom, Atom] = {}
+    for atom in molecule.atoms:
+        copy_atom: Atom
+        if isinstance(atom, ActiveH):
+            copy_atom = ActiveH(clone)
+        else:
+            copy_atom = Atom(atom.name, clone)
+        copy_atom._charge = atom._charge
+        mapping[atom] = copy_atom
+    for bond in molecule.bonds:
+        atom1, atom2 = bond.atoms
+        _make_bond(
+            mapping[atom1],
+            mapping[atom2],
+            order=bond.order,
+            stereo=bond.stereo,
+            aromatic=bond.aromatic,
+        )
+    for pi in molecule.pi_systems:
+        members = [mapping[atom] for atom in pi.atoms]
+        clone.pi_systems.append(_make_pi_system(members, dbe=pi.dbe, aromatic=pi.aromatic))
+    if atom_map is not None:
+        atom_map.clear()
+        atom_map.update(mapping)
+    return clone
+
+
 def _display_formula(formula: dict[str, int]) -> str:
     parts: list[str] = []
     for element, num in formula.items():
