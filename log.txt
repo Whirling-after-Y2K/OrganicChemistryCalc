@@ -1,3 +1,0 @@
-load molecules/±½.txt
-la
-end
