@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>有机分子查看器</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/vue.global.prod.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <header class="toolbar">
+    <div class="brand">有机分子查看器</div>
+    <button class="primary" @click="pickFile">打开分子…</button>
+    <input ref="fileInput" type="file" accept=".py,.txt,text/plain" style="display:none"
+           @change="onFileChosen">
+    <input type="text" v-model="pathText" placeholder="或输入服务器路径（如 demo_output\c6h6\isomer_01.py）"
+           @keydown.enter="loadByPath">
+    <button @click="loadByPath">按路径打开</button>
+    <span class="spacer"></span>
+    <button @click="zoomBy(-1)">缩小</button>
+    <button @click="zoomBy(1)">放大</button>
+    <button @click="fitView">适应窗口</button>
+  </header>
+
+  <main class="layout">
+    <section class="canvas-wrap" @dragover.prevent @drop.prevent="onDropFile">
+      <canvas ref="canvas"></canvas>
+    </section>
+    <aside class="info">
+      <h2>分子信息</h2>
+      <div v-if="!molecule" class="empty">
+        请打开一个分子文件（支持把文件拖到画布区域，或点击“打开分子…”）。
+      </div>
+      <dl v-else>
+        <dt>文件</dt><dd>{{ molecule.source }}</dd>
+        <dt>名称</dt><dd>{{ molecule.name || '未命名' }}</dd>
+        <dt>分子式</dt><dd v-html="formulaHtml"></dd>
+        <dt>不饱和度</dt><dd>{{ molecule.unsaturation }}</dd>
+        <dt>环数</dt><dd>{{ molecule.ring_count }}</dd>
+        <dt>原子 / 键 / π 体系</dt>
+        <dd>{{ molecule.atom_count }} / {{ molecule.bond_count }} / {{ molecule.pi_count }}</dd>
+        <dt>连通分量</dt><dd>{{ molecule.component_count }}</dd>
+        <dt>官能团</dt>
+        <dd>
+          <template v-if="molecule.groups.length">
+            <span v-for="g in molecule.groups" :key="g.name + g.atoms.join(',')" class="chip">{{ g.name }}</span>
+          </template>
+          <template v-else>未检出</template>
+        </dd>
+      </dl>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span v-if="error" class="error">⚠ {{ error }}</span>
+    <span v-else>{{ status }}</span>
+    <span class="warn">提示：分子文件会执行其中的代码，请只加载可信文件。</span>
+  </footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
