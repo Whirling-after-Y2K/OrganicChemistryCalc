@@ -476,12 +476,13 @@ def _atom_label(atom: oc.Atom) -> str:
     if atom.name == "c":
         if atom.implicit_h == 0:
             return "C"
-        return "C" + "H" + _subscript(atom.implicit_h)
+        suffix = _subscript(atom.implicit_h) if atom.implicit_h > 1 else ""
+        return "C" + "H" + suffix
     if atom.name == "h":
         return "H"
     label = atom.name.capitalize()
     if atom.implicit_h:
-        label += "H" + _subscript(atom.implicit_h)
+        label += "H" + (_subscript(atom.implicit_h) if atom.implicit_h > 1 else "")
     return label
 
 
