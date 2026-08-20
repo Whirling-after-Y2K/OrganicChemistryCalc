@@ -8,6 +8,8 @@
   各返回一个实例，同一基团在同一位置（core 原子集合相同）的重复匹配合并。
 - 活性位点：在基团结果之上按规则生成原子级标注；隐氢位点锚定在承载氢的
   重原子（碳/氧）上，仅 ActiveH 显式节点存在时酸性位点锚定到该节点。
+- 苯环取代位点：结合定位效应只标有利位置（邻对位/间位），多取代时按每个
+  取代基分别标注；ActiveSite.position 记录 邻位/间位/对位。
 """
 
 from __future__ import annotations
@@ -79,15 +81,25 @@ class ActiveSite:
     kind 取值：alpha_h 羧基/醛基/酮羰基的 α-H；acidic_h 羧基/酚羟基的酸性氢；
     addition 碳碳双键/三键的加成位点；substitution 苯环/卤代烃的取代位点；
     oxidation 醇/醛的氧化位点；reduction 硝基的还原位点；hydrolysis 酯的水解位点。
+    position 为苯环取代位点的几何位置（邻位/间位/对位，多取代时合并），
+    非苯环位点为 None。
     """
 
-    def __init__(self, atom: oc.Atom, kind: SiteKind, label: str) -> None:
+    def __init__(
+        self,
+        atom: oc.Atom,
+        kind: SiteKind,
+        label: str,
+        position: str | None = None,
+    ) -> None:
         self.atom: oc.Atom = atom
         self.kind: SiteKind = kind
         self.label: str = label
+        self.position: str | None = position
 
     def __repr__(self) -> str:
-        return f"<ActiveSite {self.kind} {self.atom} {self.label}>"
+        suffix = f" [{self.position}]" if self.position is not None else ""
+        return f"<ActiveSite {self.kind} {self.atom} {self.label}{suffix}>"
 
 
 def _total_h(atom: oc.Atom) -> int:
@@ -249,7 +261,11 @@ def functional_groups(molecule: oc.Molecule) -> list[FunctionalGroup]:
     covered: dict[oc.Atom, str] = {}
     for spec, match in raw:
         core_atoms = [match.atom_map[p_atom] for p_atom in spec.core]
-        if any(atom in covered and covered[atom] != spec.name for atom in core_atoms):
+        # 苯环占据的环碳不抑制取代基类基团（如氯苯的 卤代烃 与 苯环 共存）
+        if any(
+            atom in covered and covered[atom] != spec.name and covered[atom] != '苯环'
+            for atom in core_atoms
+        ):
             continue
         for atom in core_atoms:
             covered.setdefault(atom, spec.name)
@@ -295,6 +311,110 @@ def _acidic_anchor(o_atom: oc.Atom) -> oc.Atom:
     return o_atom
 
 
+Directing: TypeAlias = Literal["ortho_para", "meta"]
+
+_HALOGEN_NAMES: dict[str, str] = {"f": "氟", "cl": "氯", "br": "溴", "i": "碘"}
+_ORTHO_PARA_GROUPS: frozenset[str] = frozenset({"酚羟基", "氨基", "醚键", "卤代烃", "苯环"})
+_META_GROUPS: frozenset[str] = frozenset({"硝基", "羧基", "醛基", "酯基", "酮羰基", "酰胺键"})
+
+
+def _directing_of(substituent: str) -> Directing:
+    """按取代基名称返回定位类型：邻对位定位基 或 间位定位基。"""
+    if substituent in _ORTHO_PARA_GROUPS or substituent == '烷基':
+        return 'ortho_para'
+    return 'meta'
+
+
+def _ring_cycle(ring_atoms: tuple[oc.Atom, ...]) -> list[oc.Atom] | None:
+    """把 6 个环碳按成键顺序排成一圈；无法成环时返回 None。"""
+    ring_set = set(ring_atoms)
+    if len(ring_set) != 6:
+        return None
+    start = ring_atoms[0]
+    ring_neighbors = [
+        bond.other(start) for bond in start.bonds
+        if bond.other(start) in ring_set
+    ]
+    if len(ring_neighbors) != 2:
+        return None
+    cycle: list[oc.Atom] = [start]
+    prev, current = start, ring_neighbors[0]
+    while current is not start:
+        cycle.append(current)
+        next_atom: oc.Atom | None = None
+        for bond in current.bonds:
+            candidate = bond.other(current)
+            if candidate in ring_set and candidate is not prev:
+                next_atom = candidate
+                break
+        if next_atom is None:
+            return None
+        prev, current = current, next_atom
+        if len(cycle) > 6:
+            return None
+    return cycle if len(cycle) == 6 else None
+
+
+def _attached_groups(
+    atom: oc.Atom,
+    ring_set: set[oc.Atom],
+    groups: list[FunctionalGroup],
+) -> list[FunctionalGroup]:
+    """挂在该原子上的基团：基团中存在"不属于本环"的原子与该原子成键。"""
+    result: list[FunctionalGroup] = []
+    for group in groups:
+        for group_atom in group.atoms:
+            if group_atom in ring_set:
+                continue
+            if any(bond.other(group_atom) is atom for bond in group_atom.bonds):
+                result.append(group)
+                break
+    return result
+
+
+def _substituent_info(
+    ring_atom: oc.Atom,
+    ring_set: set[oc.Atom],
+    groups: list[FunctionalGroup],
+) -> tuple[str, Directing] | None:
+    """返回 (取代基标签, 定位类型)；无法识别时返回 None。
+
+    优先用挂在该环碳上的已保留基团；无基团时按外部邻居原子兜底
+    （卤素、烷基、羟基、氨基均视为邻对位定位基）。
+    """
+    for group in _attached_groups(ring_atom, ring_set, groups):
+        if group.name == '苯环':
+            return '苯基', 'ortho_para'
+        if group.name == '卤代烃':
+            halogen = next(
+                (atom for atom in group.atoms if atom.name in _HALOGEN_NAMES),
+                None,
+            )
+            if halogen is not None:
+                return _HALOGEN_NAMES[halogen.name], 'ortho_para'
+            continue
+        if group.name in _ORTHO_PARA_GROUPS or group.name in _META_GROUPS:
+            return group.name, _directing_of(group.name)
+    for bond in ring_atom.bonds:
+        neighbor = bond.other(ring_atom)
+        if neighbor in ring_set or neighbor.name == 'h':
+            continue
+        if neighbor.name in _HALOGEN_NAMES:
+            return _HALOGEN_NAMES[neighbor.name], 'ortho_para'
+        if neighbor.name == 'c':
+            return '烷基', 'ortho_para'
+        if neighbor.name == 'o':
+            return '羟基', 'ortho_para'
+        if neighbor.name == 'n':
+            return '氨基', 'ortho_para'
+    return None
+
+
+def _in_pi_system(atom: oc.Atom) -> bool:
+    """原子是否属于某个 π 体系。"""
+    return any(atom in pi.atoms for pi in atom.belong.pi_systems)
+
+
 def active_sites(molecule: oc.Molecule) -> list[ActiveSite]:
     """返回分子中的活性位点列表（派生分析）。
 
@@ -304,12 +424,17 @@ def active_sites(molecule: oc.Molecule) -> list[ActiveSite]:
     sites: list[ActiveSite] = []
     seen: set[tuple[oc.Atom, SiteKind]] = set()
 
-    def add(atom: oc.Atom, kind: SiteKind, label: str) -> None:
+    def add(
+        atom: oc.Atom,
+        kind: SiteKind,
+        label: str,
+        position: str | None = None,
+    ) -> None:
         key = (atom, kind)
         if key in seen:
             return
         seen.add(key)
-        sites.append(ActiveSite(atom, kind, label))
+        sites.append(ActiveSite(atom, kind, label, position=position))
 
     for group in groups:
         if group.name in ('羧基', '醛基', '酮羰基'):
@@ -326,12 +451,68 @@ def active_sites(molecule: oc.Molecule) -> list[ActiveSite]:
             for atom in group.atoms:
                 add(atom, 'addition', f"{group.name}的加成位点")
         if group.name == '苯环':
-            for atom in group.atoms:
-                if _total_h(atom) >= 1:
-                    add(atom, 'substitution', '苯环的取代位点')
+            ring_set = set(group.atoms)
+            other_groups = [g for g in groups if g is not group]
+            cycle = _ring_cycle(group.atoms)
+            if cycle is None:
+                for atom in group.atoms:
+                    if _total_h(atom) >= 1:
+                        add(atom, 'substitution', '苯环的取代位点')
+                continue
+            substituents: dict[int, tuple[str, Directing]] = {}
+            for index, ring_atom in enumerate(cycle):
+                info = _substituent_info(ring_atom, ring_set, other_groups)
+                if info is not None:
+                    substituents[index] = info
+            if not substituents:
+                for atom in group.atoms:
+                    if _total_h(atom) >= 1:
+                        add(atom, 'substitution', '苯环的取代位点')
+                continue
+            for index, ring_atom in enumerate(cycle):
+                if _total_h(ring_atom) < 1:
+                    continue
+                annotations: list[tuple[str, str]] = []
+                for s_index, (s_label, s_directing) in substituents.items():
+                    if s_index == index:
+                        continue
+                    distance = min((index - s_index) % 6, (s_index - index) % 6)
+                    if distance == 1:
+                        position = '邻位'
+                    elif distance == 2:
+                        position = '间位'
+                    else:
+                        position = '对位'
+                    favored = (
+                        position in ('邻位', '对位')
+                        if s_directing == 'ortho_para'
+                        else position == '间位'
+                    )
+                    if favored:
+                        annotations.append((position, s_label))
+                if not annotations:
+                    continue
+                if len(annotations) == 1:
+                    position, s_label = annotations[0]
+                    add(
+                        ring_atom,
+                        'substitution',
+                        f'苯环的{position}取代位点（{s_label}）',
+                        position=position,
+                    )
+                else:
+                    positions = '、'.join(dict.fromkeys(p for p, _ in annotations))
+                    details = '；'.join(f'{p}·{s}' for p, s in annotations)
+                    add(
+                        ring_atom,
+                        'substitution',
+                        f'苯环的取代位点（{details}）',
+                        position=positions,
+                    )
         if group.name == '卤代烃':
             c_atom = next((atom for atom in group.atoms if atom.name == 'c'), None)
-            if c_atom is not None:
+            # 芳香环上的 C-X 不进行亲核取代/消去（如氯苯），不标取代位点
+            if c_atom is not None and not _in_pi_system(c_atom):
                 add(c_atom, 'substitution', '卤代烃的取代位点')
         if group.name == '醇羟基':
             o_atom = next((atom for atom in group.atoms if atom.name == 'o'), None)
