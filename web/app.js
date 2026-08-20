@@ -258,13 +258,6 @@ const viewerApp = createApp({
     drawAtom(ctx, atom, transform) {
       const [x, y] = transform(atom.x, atom.y);
       const color = atom.active ? ACTIVE_H_COLOR : ELEMENT_COLORS[atom.element] || "#333";
-      if (atom.element === "c" && atom.ring) {
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.arc(x, y, 2.8, 0, Math.PI * 2);
-        ctx.fill();
-        return;
-      }
       const label = atom.label || atom.element.toUpperCase();
       ctx.font = "600 15px 'Segoe UI', Arial, sans-serif";
       ctx.textAlign = "center";
