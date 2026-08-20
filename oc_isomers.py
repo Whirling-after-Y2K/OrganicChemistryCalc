@@ -14,21 +14,55 @@
   列出，v1 不保证规范表示。
 - 剪枝：氢数预算（当前隐氢数不能低于目标）、不饱和度预算（基团贡献 +
   多重键 + 已形成环数不能超过目标）、孤立原子剪枝。
+- 基团约束：可要求搜索结果必须含有指定基团（复用 oc_features 的基团检测）。
+  苯环/硝基在模式层剪枝，其余基团在 DFS 中用必要条件剪枝（宁可少剪，
+  不可剪错），枚举后统一用 functional_groups 过滤作为最终准确保证。
 - 输出：全部同分异构体（含输入结构本身的隐氢形式），按结构指纹稳定排序。
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import oc_io
+import oc_features
 import organic_chemistry as oc
 
 MAX_HEAVY_ATOMS: int = 12
 
 # 单价元素：隐氢模型无法承载氢（如 HF/HCl），此类分子退化为仅输入本身
 _MONOVALENT: frozenset[str] = frozenset({"f", "cl", "br", "i"})
+
+# ---- 基团约束（名称与 oc_features 注册表保持一致）----
+_GROUP_CARBOXYL: str = "羧基"
+_GROUP_NITRO: str = "硝基"
+_GROUP_RING: str = "苯环"
+_GROUP_ALDEHYDE: str = "醛基"
+_GROUP_ESTER: str = "酯基"
+_GROUP_AMIDE: str = "酰胺键"
+_GROUP_KETONE: str = "酮羰基"
+_GROUP_PHENOL_OH: str = "酚羟基"
+_GROUP_AMINO: str = "氨基"
+_GROUP_ETHER: str = "醚键"
+_GROUP_ALCOHOL_OH: str = "醇羟基"
+_GROUP_HALO: str = "卤代烃"
+_GROUP_DOUBLE: str = "碳碳双键"
+_GROUP_TRIPLE: str = "碳碳三键"
+_GROUP_HYDROXY_ALIAS: str = "羟基"
+
+# 公开的合法基团名称（含"羟基"别名），供调用方与后续 UI 选择
+REQUIRED_GROUP_NAMES: tuple[str, ...] = tuple(
+    dict.fromkeys([spec.name for spec in oc_features.GROUP_SPECS] + [_GROUP_HYDROXY_ALIAS])
+)
+
+# 硬编码名称必须都在 oc_features 注册表中，防止手误
+assert {spec.name for spec in oc_features.GROUP_SPECS}.issuperset({
+    _GROUP_CARBOXYL, _GROUP_NITRO, _GROUP_RING, _GROUP_ALDEHYDE, _GROUP_ESTER,
+    _GROUP_AMIDE, _GROUP_KETONE, _GROUP_PHENOL_OH, _GROUP_AMINO, _GROUP_ETHER,
+    _GROUP_ALCOHOL_OH, _GROUP_HALO, _GROUP_DOUBLE, _GROUP_TRIPLE,
+})
 
 
 def _display_formula(formula: dict[str, int]) -> str:
@@ -78,48 +112,149 @@ def _formula_dbe(formula: dict[str, int]) -> int:
     return (2 * carbon + 2 + nitrogen - hydrogen - halogens) // 2
 
 
-def find_isomers(molecule: oc.Molecule) -> list[oc.Molecule]:
+def _resolve_required_groups(required_groups: Sequence[str] | None) -> frozenset[str]:
+    """校验并去重基团名称；未知名称抛 ValueError。别名"羟基"在判断时按任一处理。"""
+    if required_groups is None:
+        return frozenset()
+    valid = set(REQUIRED_GROUP_NAMES)
+    resolved: set[str] = set()
+    for name in required_groups:
+        if name not in valid:
+            raise ValueError(
+                f"未知基团名称：{name!r}，可选：{'、'.join(REQUIRED_GROUP_NAMES)}"
+            )
+        resolved.add(name)
+    return frozenset(resolved)
+
+
+def _group_present(names: set[str], name: str) -> bool:
+    """基团名是否满足："羟基"别名 = 醇羟基或酚羟基任一出现。"""
+    if name == _GROUP_HYDROXY_ALIAS:
+        return _GROUP_ALCOHOL_OH in names or _GROUP_PHENOL_OH in names
+    return name in names
+
+
+def _formula_possible(
+    resolved: frozenset[str],
+    heavy: dict[str, int],
+    dbe: int,
+    target: dict[str, int],
+) -> bool:
+    """公式级必要条件检查：任一必需基团在分子式层面不可能出现时返回 False。"""
+    carbon = heavy.get('c', 0)
+    nitrogen = heavy.get('n', 0)
+    oxygen = heavy.get('o', 0)
+    hydrogen = target.get('h', 0)
+    halogens = (
+        heavy.get('f', 0)
+        + heavy.get('cl', 0)
+        + heavy.get('br', 0)
+        + heavy.get('i', 0)
+    )
+    for name in resolved:
+        if name == _GROUP_RING:
+            ok = carbon >= 6 and dbe >= 4
+        elif name == _GROUP_NITRO:
+            ok = carbon >= 1 and nitrogen >= 1 and oxygen >= 2 and dbe >= 1
+        elif name == _GROUP_CARBOXYL:
+            ok = carbon >= 1 and oxygen >= 2 and dbe >= 1
+        elif name == _GROUP_ALDEHYDE:
+            ok = carbon >= 1 and oxygen >= 1 and hydrogen >= 1 and dbe >= 1
+        elif name == _GROUP_ESTER:
+            ok = carbon >= 2 and oxygen >= 2 and dbe >= 1
+        elif name == _GROUP_AMIDE:
+            ok = carbon >= 1 and nitrogen >= 1 and oxygen >= 1 and dbe >= 1
+        elif name == _GROUP_KETONE:
+            ok = carbon >= 3 and oxygen >= 1 and dbe >= 1
+        elif name == _GROUP_PHENOL_OH:
+            ok = carbon >= 6 and oxygen >= 1 and dbe >= 4
+        elif name == _GROUP_AMINO:
+            ok = carbon >= 1 and nitrogen >= 1 and hydrogen >= 1
+        elif name == _GROUP_ETHER:
+            ok = carbon >= 2 and oxygen >= 1
+        elif name == _GROUP_ALCOHOL_OH:
+            ok = carbon >= 1 and oxygen >= 1
+        elif name == _GROUP_HALO:
+            ok = carbon >= 1 and halogens >= 1
+        elif name == _GROUP_DOUBLE:
+            ok = carbon >= 2 and dbe >= 1
+        elif name == _GROUP_TRIPLE:
+            ok = carbon >= 2 and dbe >= 2
+        elif name == _GROUP_HYDROXY_ALIAS:
+            ok = carbon >= 1 and oxygen >= 1
+        else:
+            ok = True
+        if not ok:
+            return False
+    return True
+
+
+def _contains_groups(molecule: oc.Molecule, resolved: frozenset[str]) -> bool:
+    """候选分子是否包含全部必需基团（复用 oc_features，最终准确保证）。"""
+    names = {group.name for group in oc_features.functional_groups(molecule)}
+    return all(_group_present(names, name) for name in resolved)
+
+
+def find_isomers(
+    molecule: oc.Molecule,
+    required_groups: Sequence[str] | None = None,
+) -> list[oc.Molecule]:
     """返回分子的全部同分异构体（含输入结构本身的隐氢形式）。
 
     - 结果按 (tuple(feature), 生成序) 稳定排序，已按结构判等去重；
+    - required_groups 指定必须含有的基团名称（每种至少 1 个），
+      未知名称抛 ValueError；分子式层面不可能时直接返回空列表；
     - 重原子数超过 MAX_HEAVY_ATOMS 抛 ValueError；
     - 无法用隐氢模型表示的分子（如 H2、HF）退化为仅返回输入本身；
     - 可含苯环的分子式只枚举含苯环/硝基的结构族（高中口径）。
     """
+    resolved = _resolve_required_groups(required_groups)
     molecule.validate()
     target = dict(molecule.formula)
     heavy = _heavy_counts(molecule)
     total_heavy = sum(heavy.values())
     if total_heavy > MAX_HEAVY_ATOMS:
         raise ValueError(f"重原子数 {total_heavy} 超过上限 {MAX_HEAVY_ATOMS}")
+
+    dbe = _formula_dbe(target)
+    if not _formula_possible(resolved, heavy, dbe, target):
+        return []
+
+    collected: list[oc.Molecule] = []
     if total_heavy == 0 or (
         all(element in _MONOVALENT for element in heavy) and target.get('h', 0) > 0
     ):
-        return [oc.copy_molecule(molecule)]
-
-    dbe = _formula_dbe(target)
-    collected: list[oc.Molecule] = []
-    if heavy.get('c', 0) >= 6 and dbe >= 4:
-        for k_b in range(1, heavy.get('c', 0) // 6 + 1):
-            budget = dbe - 4 * k_b
-            if budget < 0:
-                continue
-            max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, budget)
-            for k_n in range(max_nitro + 1):
-                _collect_mode(k_b, k_n, heavy, target, collected)
-        if not collected:
-            # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式
+        collected.append(oc.copy_molecule(molecule))
+    else:
+        nitro_min = 1 if _GROUP_NITRO in resolved else 0
+        benzene_capable = heavy.get('c', 0) >= 6 and dbe >= 4
+        if benzene_capable:
+            for k_b in range(1, heavy.get('c', 0) // 6 + 1):
+                budget = dbe - 4 * k_b
+                if budget < 0:
+                    continue
+                max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, budget)
+                for k_n in range(nitro_min, max_nitro + 1):
+                    _collect_mode(k_b, k_n, heavy, target, resolved, collected)
+            if not collected and _GROUP_RING not in resolved and _GROUP_PHENOL_OH not in resolved:
+                # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式
+                max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe)
+                for k_n in range(nitro_min, max_nitro + 1):
+                    if k_n > 0 and heavy.get('c', 0) == 0:
+                        continue
+                    _collect_mode(0, k_n, heavy, target, resolved, collected)
+        else:
             max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe)
-            for k_n in range(max_nitro + 1):
+            for k_n in range(nitro_min, max_nitro + 1):
                 if k_n > 0 and heavy.get('c', 0) == 0:
                     continue
-                _collect_mode(0, k_n, heavy, target, collected)
-    else:
-        max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe)
-        for k_n in range(max_nitro + 1):
-            if k_n > 0 and heavy.get('c', 0) == 0:
-                continue
-            _collect_mode(0, k_n, heavy, target, collected)
+                _collect_mode(0, k_n, heavy, target, resolved, collected)
+
+    if resolved:
+        collected = [
+            candidate for candidate in collected
+            if _contains_groups(candidate, resolved)
+        ]
 
     buckets: dict[tuple[str, ...], list[oc.Molecule]] = {}
     results: list[oc.Molecule] = []
@@ -139,12 +274,14 @@ def _collect_mode(
     k_n: int,
     heavy: dict[str, int],
     target: dict[str, int],
+    resolved: frozenset[str],
     collected: list[oc.Molecule],
 ) -> None:
     """枚举含 k_b 个苯环基团、k_n 个硝基基团的所有候选。
 
     递归原子清单：先苯环槽位（6k_b 个，容量 1），再硝基 N（k_n 个，容量 1），
     最后按元素排序的剩余自由原子。苯环/硝基内部结构固定，不参与成键递归。
+    resolved 为必需基团的展开集合，用于 DFS 过程必要条件剪枝。
     """
     elements: list[str] = []
     limits: list[int] = []
@@ -194,6 +331,10 @@ def _collect_mode(
     bond_count: list[int] = [0] * n
     bonds: list[tuple[int, int, int]] = []
     partner: list[int] = [-1] * n
+    pairs: list[tuple[int, int]] = [
+        (a, b) for a in range(n) for b in range(a + 1, n)
+    ]
+    halogens: frozenset[str] = frozenset({"f", "cl", "br", "i"})
 
     def current_h() -> int:
         total = 0
@@ -266,7 +407,265 @@ def _collect_mode(
             return
         collected.append(molecule)
 
-    def backtrack(i: int, j: int) -> None:
+    # ---- 基团必要条件剪枝（仅在存在约束时启用；宁可少剪，不可剪错）----
+    def bondable(a: int, b: int, caps: list[int]) -> bool:
+        """未决原子对是否还能成键（排除同环槽位对、容量不足）。"""
+        if is_slot[a] and is_slot[b] and ring_id[a] == ring_id[b]:
+            return False
+        return caps[a] >= 1 and caps[b] >= 1
+
+    def exact_bond_possible(
+        e1: str,
+        e2: str,
+        order: int,
+        dbe_need: int,
+        caps: list[int],
+        pending: list[tuple[int, int]],
+        dbe_left: int,
+    ) -> bool:
+        """已存在或仍可形成指定元素间指定键级的键（如 C=C、C≡C）。"""
+        for a, b, o in bonds:
+            if o == order and {elements[a], elements[b]} == {e1, e2}:
+                return True
+        if dbe_left < dbe_need:
+            return False
+        for a, b in pending:
+            if (
+                bondable(a, b, caps)
+                and caps[a] >= order
+                and caps[b] >= order
+                and {elements[a], elements[b]} == {e1, e2}
+            ):
+                return True
+        return False
+
+    def carbonyl_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+        dbe_left: int,
+    ) -> bool:
+        """已存在或仍可形成 C=O 双键。"""
+        for a, b, o in bonds:
+            if o == 2 and {elements[a], elements[b]} == {'c', 'o'}:
+                return True
+        if dbe_left < 1:
+            return False
+        for a, b in pending:
+            if (
+                bondable(a, b, caps)
+                and caps[a] >= 2
+                and caps[b] >= 2
+                and {elements[a], elements[b]} == {'c', 'o'}
+            ):
+                return True
+        return False
+
+    def has_carbon_neighbor(index: int) -> bool:
+        """已分配的键中是否与碳相邻。"""
+        for x, y, o in bonds:
+            if o > 0:
+                if x == index and elements[y] == 'c':
+                    return True
+                if y == index and elements[x] == 'c':
+                    return True
+        return False
+
+    def pending_carbon_pair(
+        index: int,
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """未决原子对中是否存在与碳的可成键对。"""
+        for a, b in pending:
+            if a == index:
+                other = b
+            elif b == index:
+                other = a
+            else:
+                continue
+            if elements[other] == 'c' and bondable(index, other, caps):
+                return True
+        return False
+
+    def free_o_oh_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """存在可成为 O-H 的游离 O（当前占用 <=1，已连碳或可连碳）。"""
+        for a in range(n):
+            if elements[a] != 'o' or used[a] > 1:
+                continue
+            if has_carbon_neighbor(a) or pending_carbon_pair(a, caps, pending):
+                return True
+        return False
+
+    def free_n_amino_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """存在可挂氢且连碳的游离 N（当前占用 <=2）。"""
+        for a in range(n):
+            if elements[a] != 'n' or used[a] > 2:
+                continue
+            if has_carbon_neighbor(a) or pending_carbon_pair(a, caps, pending):
+                return True
+        return False
+
+    def ether_o_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """存在可连两个碳的 O（醚键 / 酯桥）。"""
+        for a in range(n):
+            if elements[a] != 'o' or used[a] > 2:
+                continue
+            c_bonds = 0
+            for x, y, o in bonds:
+                if o > 0:
+                    if x == a and elements[y] == 'c':
+                        c_bonds += 1
+                    elif y == a and elements[x] == 'c':
+                        c_bonds += 1
+            c_pending = 0
+            for a2, b2 in pending:
+                if a2 == a:
+                    other = b2
+                elif b2 == a:
+                    other = a2
+                else:
+                    continue
+                if elements[other] == 'c' and bondable(a, other, caps):
+                    c_pending += 1
+            if c_bonds + c_pending >= 2:
+                return True
+        return False
+
+    def phenol_o_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """存在可连苯环槽位的未饱和 O（酚羟基）。"""
+        if k_b == 0:
+            return False
+        for a in range(n):
+            if elements[a] != 'o' or used[a] > 1:
+                continue
+            slot_bonded = False
+            for x, y, o in bonds:
+                if o > 0 and a in (x, y):
+                    slot_bonded = is_slot[y if x == a else x]
+                    if slot_bonded:
+                        break
+            if slot_bonded:
+                return True
+            for a2, b2 in pending:
+                if a2 == a:
+                    other = b2
+                elif b2 == a:
+                    other = a2
+                else:
+                    continue
+                if is_slot[other] and bondable(a, other, caps):
+                    return True
+        return False
+
+    def halo_possible(
+        caps: list[int],
+        pending: list[tuple[int, int]],
+    ) -> bool:
+        """已存在或仍可形成 C-卤素 键。"""
+        for a, b, o in bonds:
+            if o > 0 and (
+                (elements[a] == 'c' and elements[b] in halogens)
+                or (elements[b] == 'c' and elements[a] in halogens)
+            ):
+                return True
+        for a, b in pending:
+            if bondable(a, b, caps) and (
+                (elements[a] == 'c' and elements[b] in halogens)
+                or (elements[b] == 'c' and elements[a] in halogens)
+            ):
+                return True
+        return False
+
+    def feasible(pos: int) -> bool:
+        """所有必需基团在当前状态下仍有可能形成（必要条件，保守）。"""
+        if not resolved:
+            return True
+        caps = [limits[i] - used[i] for i in range(n)]
+        dbe_left = (
+            target_dbe - base_dbe
+            - sum(order - 1 for _, _, order in bonds)
+            - count_rings()
+        )
+        pending = pairs[pos:]
+        for name in resolved:
+            if name == _GROUP_RING:
+                if k_b == 0:
+                    return False
+            elif name == _GROUP_NITRO:
+                if k_n == 0:
+                    return False
+            elif name == _GROUP_DOUBLE:
+                if not exact_bond_possible('c', 'c', 2, 1, caps, pending, dbe_left):
+                    return False
+            elif name == _GROUP_TRIPLE:
+                if not exact_bond_possible('c', 'c', 3, 2, caps, pending, dbe_left):
+                    return False
+            elif name == _GROUP_ALDEHYDE:
+                if not carbonyl_possible(caps, pending, dbe_left):
+                    return False
+                if not any(
+                    elements[a] == 'c'
+                    and max(0, h0[a] - (used[a] - base[a])) >= 1
+                    for a in range(n)
+                ):
+                    return False
+            elif name == _GROUP_CARBOXYL:
+                if not (
+                    carbonyl_possible(caps, pending, dbe_left)
+                    and free_o_oh_possible(caps, pending)
+                ):
+                    return False
+            elif name == _GROUP_ESTER:
+                if not (
+                    carbonyl_possible(caps, pending, dbe_left)
+                    and ether_o_possible(caps, pending)
+                ):
+                    return False
+            elif name == _GROUP_AMIDE:
+                if not (
+                    carbonyl_possible(caps, pending, dbe_left)
+                    and free_n_amino_possible(caps, pending)
+                ):
+                    return False
+            elif name == _GROUP_KETONE:
+                if not carbonyl_possible(caps, pending, dbe_left):
+                    return False
+            elif name == _GROUP_ALCOHOL_OH:
+                if not free_o_oh_possible(caps, pending):
+                    return False
+            elif name == _GROUP_PHENOL_OH:
+                if not phenol_o_possible(caps, pending):
+                    return False
+            elif name == _GROUP_HYDROXY_ALIAS:
+                if not (
+                    free_o_oh_possible(caps, pending)
+                    or phenol_o_possible(caps, pending)
+                ):
+                    return False
+            elif name == _GROUP_AMINO:
+                if not free_n_amino_possible(caps, pending):
+                    return False
+            elif name == _GROUP_ETHER:
+                if not ether_o_possible(caps, pending):
+                    return False
+            elif name == _GROUP_HALO:
+                if not halo_possible(caps, pending):
+                    return False
+        return True
+
+    def backtrack(i: int, j: int, pos: int) -> None:
         if i == n:
             build_leaf()
             return
@@ -275,6 +674,8 @@ def _collect_mode(
             return
         if h_now == target_h:
             # 再成键只会减少氢数：剩余原子对只能全为 0，直接按当前状态收尾
+            if not feasible(pos):
+                return
             build_leaf()
             return
         if j == n:
@@ -284,13 +685,15 @@ def _collect_mode(
                     return
             elif not is_slot[i] and n > 1 and bond_count[i] == 0:
                 return
-            backtrack(i + 1, i + 2)
+            backtrack(i + 1, i + 2, pos)
             return
         if base_dbe + sum(order - 1 for _, _, order in bonds) + count_rings() > target_dbe:
             return
+        if not feasible(pos):
+            return
         if is_slot[i] and is_slot[j] and ring_id[i] == ring_id[j]:
             # 同一苯环的两个槽位之间禁止成键（保持苯环为干净的单环）
-            backtrack(i, j + 1)
+            backtrack(i, j + 1, pos + 1)
             return
         max_order = min(3, limits[i] - used[i], limits[j] - used[j])
         for order in range(max_order + 1):
@@ -302,7 +705,7 @@ def _collect_mode(
                 bonds.append((i, j, order))
                 if is_nitro[i]:
                     partner[i] = j
-            backtrack(i, j + 1)
+            backtrack(i, j + 1, pos + 1)
             if order > 0:
                 bonds.pop()
                 bond_count[i] -= 1
@@ -312,17 +715,20 @@ def _collect_mode(
                 if is_nitro[i]:
                     partner[i] = -1
 
-    backtrack(0, 1)
+    backtrack(0, 1, 0)
 
 
-def isomer_report(molecule: oc.Molecule) -> str:
-    """控制台文字报告：分子式、总数、每个异构体的编号/分子式/不饱和度/环数。"""
-    isomers = find_isomers(molecule)
-    lines: list[str] = [
-        f"分子式：{_display_formula(molecule.formula)}",
-        f"同分异构体总数：{len(isomers)}",
-        "",
-    ]
+def isomer_report(
+    molecule: oc.Molecule,
+    required_groups: Sequence[str] | None = None,
+) -> str:
+    """控制台文字报告：分子式、基团约束、总数、每个异构体的编号/分子式/不饱和度/环数。"""
+    isomers = find_isomers(molecule, required_groups)
+    lines: list[str] = [f"分子式：{_display_formula(molecule.formula)}"]
+    if required_groups:
+        lines.append(f"基团约束：{'、'.join(dict.fromkeys(required_groups))}")
+    lines.append(f"同分异构体总数：{len(isomers)}")
+    lines.append("")
     for index, candidate in enumerate(isomers, 1):
         lines.append(
             f"异构体 {index:02d}：{_display_formula(candidate.formula)}，"
@@ -331,12 +737,16 @@ def isomer_report(molecule: oc.Molecule) -> str:
     return "\n".join(lines)
 
 
-def save_isomers(molecule: oc.Molecule, directory: str | os.PathLike[str]) -> list[Path]:
+def save_isomers(
+    molecule: oc.Molecule,
+    directory: str | os.PathLike[str],
+    required_groups: Sequence[str] | None = None,
+) -> list[Path]:
     """把全部异构体保存为构建脚本（oc_io），返回文件路径列表。
 
     目录结构：<directory>/<公式键>/isomer_01.py、isomer_02.py...
     """
-    isomers = find_isomers(molecule)
+    isomers = find_isomers(molecule, required_groups)
     folder = Path(directory) / _formula_key(molecule.formula)
     folder.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -352,4 +762,4 @@ if __name__ == "__main__":
     chain = [oc.Atom('c', demo) for _ in range(4)]
     oc.connect(chain)
     oc.add_bond(chain[0], oc.Atom('o', demo))
-    print(isomer_report(demo))
+    print(isomer_report(demo, required_groups=["醇羟基"]))
