@@ -258,16 +258,20 @@ const viewerApp = createApp({
         return false;
       }
     },
-    hitAtom(x, y) {
+    atomHitRadius(atom) {
       const fontSize = Math.max(4, ATOM_FONT_RATIO * this.zoom);
-      const radius = Math.max(16, fontSize * 0.35);
+      // 判定区域与原子本身同大（直径 ≈ 字号）
+      return Math.max(12, fontSize * 0.5);
+    },
+    hitAtom(x, y) {
       let best = null;
-      let bestDistance = radius;
+      let bestDistance = Infinity;
       for (const atom of this.molecule.atoms) {
+        const radius = this.atomHitRadius(atom);
         const sx = this.panX + atom.x * this.zoom;
         const sy = this.panY + atom.y * this.zoom;
         const d = Math.hypot(sx - x, sy - y);
-        if (d <= bestDistance) {
+        if (d <= radius && d <= bestDistance) {
           bestDistance = d;
           best = atom.id;
         }
@@ -543,16 +547,10 @@ const viewerApp = createApp({
       if (this.pendingAtom !== null && this.molecule.atoms[this.pendingAtom]) {
         const anchor = this.molecule.atoms[this.pendingAtom];
         const [px, py] = transform(anchor.x, anchor.y);
-        ctx.strokeStyle = "#1f5fb0";
+        ctx.strokeStyle = "#e74c3c";
         ctx.lineWidth = Math.max(1.5, 2 * this.zoom);
         ctx.beginPath();
-        ctx.arc(
-          px,
-          py,
-          Math.max(14, ATOM_FONT_RATIO * this.zoom * 0.35),
-          0,
-          Math.PI * 2
-        );
+        ctx.arc(px, py, this.atomHitRadius(anchor), 0, Math.PI * 2);
         ctx.stroke();
       }
     },
