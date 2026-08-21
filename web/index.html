@@ -49,7 +49,7 @@
         请打开一个分子文件（支持把文件拖到画布区域，或点击“打开分子…”）。
       </div>
       <dl v-else>
-        <dt>文件</dt><dd>{{ molecule.source }}</dd>
+        <dt>文件</dt><dd>{{ activeSource }}</dd>
         <dt>名称</dt><dd>{{ molecule.name || '未命名' }}</dd>
         <dt>分子式</dt><dd v-html="formulaHtml"></dd>
         <dt>不饱和度</dt><dd>{{ molecule.unsaturation }}</dd>

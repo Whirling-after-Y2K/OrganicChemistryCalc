@@ -20,6 +20,15 @@ function toSubscript(text) {
   return text.replace(/(\d+)/g, (m) => [...m].map((d) => digits[+d]).join(""));
 }
 
+function hashString(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 const viewerApp = createApp({
   data() {
     return {
@@ -46,6 +55,10 @@ const viewerApp = createApp({
     molecule() {
       const tab = this.tabs.find((t) => t.id === this.activeTabId);
       return tab ? tab.molecule : null;
+    },
+    activeSource() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      return tab ? tab.source : "";
     },
   },
   mounted() {
@@ -109,20 +122,37 @@ const viewerApp = createApp({
         }
         const loaded = data.molecule;
         const source = loaded.source || "";
-        const existing = this.tabs.find((t) => t.source === source);
+        // 去重键：路径加载用完整路径（忽略大小写），文件上传用 文件名+内容哈希，
+        // 避免不同目录下同名文件被误判为同一分子
+        let key = source;
+        let displaySource = source;
+        if (typeof payload.path === "string") {
+          const normPath = payload.path.replace(/\\/g, "/");
+          key = normPath.toLowerCase();
+          const parts = normPath.split("/");
+          displaySource =
+            parts.length >= 2
+              ? parts[parts.length - 2] + "\\" + parts[parts.length - 1]
+              : source;
+        } else if (
+          typeof payload.filename === "string" &&
+          typeof payload.content === "string"
+        ) {
+          key = payload.filename.toLowerCase() + ":" + hashString(payload.content);
+        }
+        const existing = this.tabs.find((t) => t.key === key);
         if (existing) {
           this.activeTabId = existing.id;
           this.status = "已激活：" + source;
-          this.restoreActiveView();
-          this.render();
+          this.$nextTick(() => this.fitView());
         } else {
           const tab = {
             id: this.nextTabId++,
-            source: source,
+            key: key,
+            source: displaySource,
             name: loaded.name || "",
             formula: loaded.formula || "",
             molecule: loaded,
-            view: { zoom: 1, panX: 0, panY: 0 },
           };
           this.tabs.push(tab);
           this.activeTabId = tab.id;
@@ -136,32 +166,10 @@ const viewerApp = createApp({
     },
 
     // ---- 标签页 ----
-    saveActiveView() {
-      const tab = this.tabs.find((t) => t.id === this.activeTabId);
-      if (tab) {
-        tab.view.zoom = this.zoom;
-        tab.view.panX = this.panX;
-        tab.view.panY = this.panY;
-      }
-    },
-    restoreActiveView() {
-      const tab = this.tabs.find((t) => t.id === this.activeTabId);
-      if (tab) {
-        this.zoom = tab.view.zoom;
-        this.panX = tab.view.panX;
-        this.panY = tab.view.panY;
-      } else {
-        this.zoom = 1;
-        this.panX = 0;
-        this.panY = 0;
-      }
-    },
     switchTab(id) {
       if (id === this.activeTabId) return;
-      this.saveActiveView();
       this.activeTabId = id;
-      this.restoreActiveView();
-      this.render();
+      this.$nextTick(() => this.fitView());
     },
     closeTab(id) {
       const index = this.tabs.findIndex((t) => t.id === id);
@@ -171,9 +179,9 @@ const viewerApp = createApp({
       if (wasActive) {
         const next = this.tabs[Math.min(index, this.tabs.length - 1)];
         this.activeTabId = next ? next.id : null;
-        this.restoreActiveView();
       }
       this.render();
+      this.$nextTick(() => this.fitView());
     },
 
     // ---- 画布尺寸与事件 ----
