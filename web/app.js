@@ -29,12 +29,30 @@ function hashString(text) {
   return (hash >>> 0).toString(36);
 }
 
+const ELEMENT_OPTIONS = [
+  { value: "c", label: "C" },
+  { value: "n", label: "N" },
+  { value: "o", label: "O" },
+  { value: "f", label: "F" },
+  { value: "cl", label: "Cl" },
+  { value: "br", label: "Br" },
+  { value: "i", label: "I" },
+  { value: "h", label: "H" },
+];
+
 const viewerApp = createApp({
   data() {
     return {
       tabs: [],
       activeTabId: null,
       nextTabId: 1,
+      editMode: "select",
+      elementOptions: ELEMENT_OPTIONS,
+      elementChoice: "c",
+      bondOrder: 1,
+      pendingAtom: null,
+      showSaveDialog: false,
+      savePath: "",
       error: "",
       status: "就绪",
       pathText: "",
@@ -46,6 +64,9 @@ const viewerApp = createApp({
       dragging: false,
       lastX: 0,
       lastY: 0,
+      dragStartX: 0,
+      dragStartY: 0,
+      dragMoved: false,
     };
   },
   computed: {
@@ -64,6 +85,7 @@ const viewerApp = createApp({
   mounted() {
     this.resizeCanvas();
     this.initCanvasEvents();
+    this.updateCursor();
     window.addEventListener("resize", () => this.resizeCanvas());
     const params = new URLSearchParams(location.search);
     const openPath = params.get("open");
@@ -153,6 +175,9 @@ const viewerApp = createApp({
             name: loaded.name || "",
             formula: loaded.formula || "",
             molecule: loaded,
+            sessionId: data.session_id || "",
+            originalPath: typeof payload.path === "string" ? payload.path : "",
+            dirty: false,
           };
           this.tabs.push(tab);
           this.activeTabId = tab.id;
@@ -182,6 +207,221 @@ const viewerApp = createApp({
       }
       this.render();
       this.$nextTick(() => this.fitView());
+    },
+
+    // ---- 编辑模式 ----
+    setEditMode(mode) {
+      this.editMode = mode;
+      this.pendingAtom = null;
+      this.updateCursor();
+      this.render();
+    },
+    updateCursor() {
+      const canvas = this.$refs.canvas;
+      if (!canvas) return;
+      if (this.editMode === "select") {
+        canvas.style.cursor = this.dragging ? "grabbing" : "grab";
+      } else if (this.editMode === "delete") {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "crosshair";
+      }
+    },
+    async editApi(opData) {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (!tab || !tab.sessionId) {
+        this.error = "没有可编辑的分子";
+        this.status = "";
+        return false;
+      }
+      this.error = "";
+      this.status = "正在编辑…";
+      try {
+        const response = await fetch("/api/edit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: tab.sessionId, ...opData }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          this.error = data.error || "编辑失败";
+          this.status = "";
+          return false;
+        }
+        tab.molecule = data.molecule;
+        tab.dirty = true;
+        this.$nextTick(() => this.fitView());
+        return true;
+      } catch (err) {
+        this.error = "请求失败：" + err.message;
+        this.status = "";
+        return false;
+      }
+    },
+    hitAtom(x, y) {
+      const fontSize = Math.max(4, ATOM_FONT_RATIO * this.zoom);
+      const radius = Math.max(16, fontSize * 0.35);
+      let best = null;
+      let bestDistance = radius;
+      for (const atom of this.molecule.atoms) {
+        const sx = this.panX + atom.x * this.zoom;
+        const sy = this.panY + atom.y * this.zoom;
+        const d = Math.hypot(sx - x, sy - y);
+        if (d <= bestDistance) {
+          bestDistance = d;
+          best = atom.id;
+        }
+      }
+      return best;
+    },
+    hitBond(x, y) {
+      const threshold = 8;
+      for (const bond of this.molecule.bonds) {
+        const a = this.molecule.atoms[bond.a];
+        const c = this.molecule.atoms[bond.b];
+        const x1 = this.panX + a.x * this.zoom;
+        const y1 = this.panY + a.y * this.zoom;
+        const x2 = this.panX + c.x * this.zoom;
+        const y2 = this.panY + c.y * this.zoom;
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? ((x - x1) * dx + (y - y1) * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const px = x1 + t * dx - x;
+        const py = y1 + t * dy - y;
+        if (Math.hypot(px, py) <= threshold) return bond;
+      }
+      return null;
+    },
+    handleCanvasClick(event) {
+      if (!this.molecule || !this.molecule.atoms.length) return;
+      if (this.editMode === "select") return;
+      const canvas = this.$refs.canvas;
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const atomId = this.hitAtom(x, y);
+      if (this.editMode === "addAtom") {
+        if (atomId !== null) {
+          this.pendingAtom = atomId;
+          this.status = "已选锚点，点击空白处添加原子";
+          this.render();
+        } else if (this.pendingAtom !== null) {
+          this.addAtomAtAnchor();
+        } else {
+          this.status = "请先点击一个原子作为锚点";
+        }
+        return;
+      }
+      if (this.editMode === "addBond") {
+        if (atomId !== null) {
+          if (this.pendingAtom === null) {
+            this.pendingAtom = atomId;
+            this.status = "已选第一个原子，再点第二个原子";
+            this.render();
+          } else if (this.pendingAtom === atomId) {
+            this.status = "请选择另一个原子";
+          } else {
+            this.addBondBetween(this.pendingAtom, atomId);
+          }
+        } else {
+          this.pendingAtom = null;
+          this.render();
+        }
+        return;
+      }
+      if (this.editMode === "delete") {
+        if (atomId !== null) {
+          this.deleteAtom(atomId);
+        } else {
+          const bond = this.hitBond(x, y);
+          if (bond) this.deleteBond(bond);
+          else this.status = "点击原子或键线进行删除";
+        }
+      }
+    },
+    async addAtomAtAnchor() {
+      const ok = await this.editApi({
+        op: "add_atom_bonded",
+        atom: this.pendingAtom,
+        element: this.elementChoice,
+        order: 1,
+      });
+      this.pendingAtom = null;
+      if (ok) this.status = "已添加原子并成键";
+    },
+    async addBondBetween(atom1, atom2) {
+      const molecule = this.molecule;
+      const existing = molecule.bonds.find(
+        (b) =>
+          (b.a === atom1 && b.b === atom2) || (b.a === atom2 && b.b === atom1)
+      );
+      if (existing && existing.order === this.bondOrder) {
+        this.pendingAtom = null;
+        this.status = "该键已是此键级";
+        return;
+      }
+      const ok = await this.editApi({
+        op: "set_bond_order",
+        atom1: atom1,
+        atom2: atom2,
+        order: this.bondOrder,
+      });
+      this.pendingAtom = null;
+      if (ok) this.status = "已设置键级";
+    },
+    async deleteAtom(atomId) {
+      const ok = await this.editApi({ op: "del_atom", atom: atomId });
+      this.pendingAtom = null;
+      if (ok) this.status = "已删除原子";
+    },
+    async deleteBond(bond) {
+      const ok = await this.editApi({
+        op: "del_bond",
+        atom1: bond.a,
+        atom2: bond.b,
+      });
+      this.pendingAtom = null;
+      if (ok) this.status = "已删除键";
+    },
+    openSaveDialog() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (!tab) return;
+      this.savePath =
+        tab.originalPath ||
+        "demo_output\\" + (tab.formula || "molecule") + ".py";
+      this.showSaveDialog = true;
+    },
+    async confirmSave() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (!tab) return;
+      const path = this.savePath.trim();
+      if (!path) {
+        this.error = "请输入保存路径";
+        return;
+      }
+      this.error = "";
+      this.status = "正在保存…";
+      try {
+        const response = await fetch("/api/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: tab.sessionId, path: path }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          this.error = data.error || "保存失败";
+          this.status = "";
+          return;
+        }
+        tab.dirty = false;
+        this.status = "已保存到：" + data.path;
+        this.showSaveDialog = false;
+      } catch (err) {
+        this.error = "请求失败：" + err.message;
+        this.status = "";
+      }
     },
 
     // ---- 画布尺寸与事件 ----
@@ -220,19 +460,36 @@ const viewerApp = createApp({
         this.dragging = true;
         this.lastX = event.clientX;
         this.lastY = event.clientY;
-        canvas.style.cursor = "grabbing";
+        this.dragStartX = event.clientX;
+        this.dragStartY = event.clientY;
+        this.dragMoved = false;
+        this.updateCursor();
       });
       window.addEventListener("mousemove", (event) => {
         if (!this.dragging) return;
-        this.panX += event.clientX - this.lastX;
-        this.panY += event.clientY - this.lastY;
+        if (
+          !this.dragMoved &&
+          Math.hypot(
+            event.clientX - this.dragStartX,
+            event.clientY - this.dragStartY
+          ) > 5
+        ) {
+          this.dragMoved = true;
+        }
+        if (this.dragMoved) {
+          this.panX += event.clientX - this.lastX;
+          this.panY += event.clientY - this.lastY;
+          this.render();
+        }
         this.lastX = event.clientX;
         this.lastY = event.clientY;
-        this.render();
       });
-      window.addEventListener("mouseup", () => {
+      window.addEventListener("mouseup", (event) => {
+        if (this.dragging && !this.dragMoved) {
+          this.handleCanvasClick(event);
+        }
         this.dragging = false;
-        canvas.style.cursor = "grab";
+        this.updateCursor();
       });
     },
 
@@ -282,6 +539,21 @@ const viewerApp = createApp({
       }
       for (const atom of this.molecule.atoms) {
         this.drawAtom(ctx, atom, transform);
+      }
+      if (this.pendingAtom !== null && this.molecule.atoms[this.pendingAtom]) {
+        const anchor = this.molecule.atoms[this.pendingAtom];
+        const [px, py] = transform(anchor.x, anchor.y);
+        ctx.strokeStyle = "#1f5fb0";
+        ctx.lineWidth = Math.max(1.5, 2 * this.zoom);
+        ctx.beginPath();
+        ctx.arc(
+          px,
+          py,
+          Math.max(14, ATOM_FONT_RATIO * this.zoom * 0.35),
+          0,
+          Math.PI * 2
+        );
+        ctx.stroke();
       }
     },
     drawEmpty(ctx) {

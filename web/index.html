@@ -18,10 +18,24 @@
     <input type="text" v-model="pathText" placeholder="或输入服务器路径（如 demo_output\c6h6\isomer_01.py）"
            @keydown.enter="loadByPath">
     <button @click="loadByPath">按路径打开</button>
+    <span class="divider"></span>
+    <button :class="{ active: editMode === 'select' }" @click="setEditMode('select')">选择</button>
+    <button :class="{ active: editMode === 'addAtom' }" @click="setEditMode('addAtom')">加原子</button>
+    <button :class="{ active: editMode === 'addBond' }" @click="setEditMode('addBond')">加键</button>
+    <button :class="{ active: editMode === 'delete' }" @click="setEditMode('delete')">删除</button>
+    <select v-model="elementChoice" :disabled="editMode !== 'addAtom'" title="新原子元素">
+      <option v-for="opt in elementOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+    </select>
+    <select v-model="bondOrder" :disabled="editMode !== 'addBond'" title="键级">
+      <option :value="1">单键</option>
+      <option :value="2">双键</option>
+      <option :value="3">三键</option>
+    </select>
     <span class="spacer"></span>
     <button @click="zoomBy(-1)">缩小</button>
     <button @click="zoomBy(1)">放大</button>
     <button @click="fitView">适应窗口</button>
+    <button class="primary" @click="openSaveDialog" :disabled="!molecule">保存</button>
   </header>
 
   <main class="layout">
@@ -35,7 +49,7 @@
         :title="t.source"
         @click="switchTab(t.id)"
       >
-        <span class="tab-main">{{ t.name || t.source }}</span>
+        <span class="tab-main">{{ t.name || t.source }}<span v-if="t.dirty" class="dirty" title="未保存">●</span></span>
         <span class="tab-formula">{{ t.formula }}</span>
         <span class="tab-close" title="关闭" @click.stop="closeTab(t.id)">×</span>
       </button>
@@ -73,6 +87,17 @@
     <span v-else>{{ status }}</span>
     <span class="warn">提示：分子文件会执行其中的代码，请只加载可信文件。</span>
   </footer>
+
+  <div v-if="showSaveDialog" class="dialog-mask" @click.self="showSaveDialog = false">
+    <div class="dialog">
+      <h3>保存分子</h3>
+      <input type="text" v-model="savePath" placeholder="如 demo_output\分子.py" @keydown.enter="confirmSave">
+      <div class="dialog-actions">
+        <button class="primary" @click="confirmSave">保存</button>
+        <button @click="showSaveDialog = false">取消</button>
+      </div>
+    </div>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>

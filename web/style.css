@@ -21,6 +21,14 @@ button {
 button:hover { background: #f0f3f7; }
 button.primary { background: #1f5fb0; border-color: #1f5fb0; color: #fff; }
 button.primary:hover { background: #1a5299; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.active { background: #1f5fb0; border-color: #1f5fb0; color: #fff; }
+button.active:hover { background: #1a5299; }
+.toolbar select {
+  padding: 4px 6px; border: 1px solid #cfd4dc; border-radius: 6px;
+  font-size: 13px; background: #fff;
+}
+.divider { width: 1px; height: 22px; background: #e2e5ea; margin: 0 2px; }
 .toolbar input[type="text"] {
   flex: 0 1 360px; min-width: 160px; padding: 5px 8px;
   border: 1px solid #cfd4dc; border-radius: 6px; font-size: 13px;
@@ -56,6 +64,7 @@ button.primary:hover { background: #1a5299; }
   display: block; font-size: 11px; color: #888;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.dirty { color: #e67e22; margin-left: 4px; font-size: 10px; }
 .tab-close {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   width: 18px; height: 18px; line-height: 16px; text-align: center;
@@ -89,3 +98,20 @@ button.primary:hover { background: #1a5299; }
 }
 .statusbar .error { color: #c0392b; }
 .statusbar .warn { margin-left: auto; color: #a08000; }
+
+.dialog-mask {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.dialog {
+  background: #fff; border-radius: 10px; padding: 18px; width: 440px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+}
+.dialog h3 { font-size: 15px; margin-bottom: 12px; color: #444; }
+.dialog input[type="text"] {
+  width: 100%; padding: 7px 9px; border: 1px solid #cfd4dc;
+  border-radius: 6px; font-size: 13px;
+}
+.dialog-actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px;
+}
