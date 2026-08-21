@@ -10,6 +10,10 @@ const ELEMENT_COLORS = {
 };
 const ACTIVE_H_COLOR = "#ff8c00";
 const BOND_COLOR = "#222222";
+// 布局键长（与 oc_render.BOND_LEN 保持一致）
+const BOND_LEN = 40;
+// 原子字号 = 键长 / 1.5，保证任意缩放下 键长 : 原子大小 ≈ 1.5 : 1
+const ATOM_FONT_RATIO = BOND_LEN / 2;
 
 function toSubscript(text) {
   const digits = "₀₁₂₃₄₅₆₇₈₉";
@@ -176,7 +180,7 @@ const viewerApp = createApp({
       const minY = Math.min(...ys), maxY = Math.max(...ys);
       const bw = Math.max(maxX - minX, 1);
       const bh = Math.max(maxY - minY, 1);
-      const margin = 70;
+      const margin = 100;
       this.zoom = Math.min(
         (this.cssW - 2 * margin) / bw,
         (this.cssH - 2 * margin) / bh,
@@ -219,14 +223,15 @@ const viewerApp = createApp({
     drawBond(ctx, p1, p2, order, transform) {
       const [x1, y1] = transform(p1.x, p1.y);
       const [x2, y2] = transform(p2.x, p2.y);
+      const z = this.zoom;
       const dx = x2 - x1, dy = y2 - y1;
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len, uy = dy / len;
       const px = -uy, py = ux;
-      const gap = 3.5;
+      const gap = 3.5 * z;
       const offsets = order === 1 ? [0] : order === 2 ? [-1, 1] : [-1, 0, 1];
       ctx.strokeStyle = BOND_COLOR;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(0.5, 2 * z);
       ctx.lineCap = "round";
       for (const off of offsets) {
         ctx.beginPath();
@@ -250,7 +255,7 @@ const viewerApp = createApp({
       }
       radius /= points.length;
       ctx.strokeStyle = BOND_COLOR;
-      ctx.lineWidth = 1.6;
+      ctx.lineWidth = Math.max(0.5, 1.6 * this.zoom);
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.stroke();
@@ -259,10 +264,11 @@ const viewerApp = createApp({
       const [x, y] = transform(atom.x, atom.y);
       const color = atom.active ? ACTIVE_H_COLOR : ELEMENT_COLORS[atom.element] || "#333";
       const label = atom.label || atom.element.toUpperCase();
-      ctx.font = "600 15px 'Segoe UI', Arial, sans-serif";
+      const fontSize = Math.max(4, ATOM_FONT_RATIO * this.zoom);
+      ctx.font = "600 " + fontSize + "px 'Segoe UI', Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.lineWidth = 3;
+      ctx.lineWidth = Math.max(0.5, fontSize * 0.2);
       ctx.strokeStyle = "rgba(255,255,255,0.92)";
       ctx.strokeText(label, x, y);
       ctx.fillStyle = color;
