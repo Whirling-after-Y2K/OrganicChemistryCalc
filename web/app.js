@@ -206,9 +206,6 @@ const viewerApp = createApp({
         const p2 = this.molecule.atoms[bond.b];
         this.drawBond(ctx, p1, p2, bond.display_order || bond.order || 1, transform);
       }
-      for (const pi of this.molecule.pi_systems) {
-        if (pi.display === "benzene") this.drawBenzeneCircle(ctx, pi, transform);
-      }
       for (const atom of this.molecule.atoms) {
         this.drawAtom(ctx, atom, transform);
       }
@@ -239,26 +236,6 @@ const viewerApp = createApp({
         ctx.lineTo(x2 + px * off * gap, y2 + py * off * gap);
         ctx.stroke();
       }
-    },
-    drawBenzeneCircle(ctx, pi, transform) {
-      const points = pi.atoms.map((i) => {
-        const atom = this.molecule.atoms[i];
-        return transform(atom.x, atom.y);
-      });
-      const cx = points.reduce((s, p) => s + p[0], 0) / points.length;
-      const cy = points.reduce((s, p) => s + p[1], 0) / points.length;
-      let radius = 0;
-      for (let i = 0; i < points.length; i++) {
-        const [ax, ay] = points[i];
-        const [bx, by] = points[(i + 1) % points.length];
-        radius += Math.hypot((ax + bx) / 2 - cx, (ay + by) / 2 - cy);
-      }
-      radius /= points.length;
-      ctx.strokeStyle = BOND_COLOR;
-      ctx.lineWidth = Math.max(0.5, 1.6 * this.zoom);
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.stroke();
     },
     drawAtom(ctx, atom, transform) {
       const [x, y] = transform(atom.x, atom.y);

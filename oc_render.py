@@ -522,6 +522,17 @@ def molecule_to_payload(molecule: oc.Molecule, source: str = "") -> dict[str, An
                 if set(bond.atoms) == {n_atom, o_atom}:
                     display_orders[tuple(sorted(bond.atoms, key=lambda a: id(a)))] = 2
                     break
+        elif kind == "benzene":
+            # 凯库勒式显示：按环顺序每隔一条边显示为双键（纯显示，不改模型）
+            pi_set = frozenset(pi.atoms)
+            for cycle in _find_simple_cycles(_adjacency(molecule)):
+                if len(cycle) == 6 and set(cycle) == pi_set:
+                    for index in (0, 2, 4):
+                        atom1, atom2 = cycle[index], cycle[(index + 1) % 6]
+                        display_orders[
+                            tuple(sorted((atom1, atom2), key=lambda a: id(a)))
+                        ] = 2
+                    break
 
     atoms: list[dict[str, Any]] = []
     for i, atom in enumerate(molecule.atoms):
