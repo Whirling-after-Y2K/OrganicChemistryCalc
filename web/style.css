@@ -27,6 +27,41 @@ button.primary:hover { background: #1a5299; }
 }
 
 .layout { flex: 1; display: flex; min-height: 0; }
+.tabs {
+  width: 168px; flex: 0 0 168px; background: #fff;
+  margin: 10px 0 10px 10px; padding: 8px;
+  border: 1px solid #e2e5ea; border-radius: 8px;
+  overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
+}
+.tabs-empty {
+  color: #aaa; font-size: 12px; text-align: center;
+  padding: 18px 4px; line-height: 1.7;
+}
+.tab {
+  position: relative; display: block; width: 100%;
+  padding: 7px 24px 7px 9px; border: 1px solid #e6e9ee;
+  border-radius: 6px; background: #fafbfc; cursor: pointer;
+  text-align: left; overflow: hidden;
+}
+.tab:hover { background: #f0f3f7; }
+.tab.active {
+  background: #eef3fb; border-color: #1f5fb0;
+  box-shadow: inset 3px 0 0 #1f5fb0;
+}
+.tab-main {
+  display: block; font-size: 12px; color: #333;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tab-formula {
+  display: block; font-size: 11px; color: #888;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tab-close {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 18px; height: 18px; line-height: 16px; text-align: center;
+  border-radius: 50%; color: #999; font-size: 14px;
+}
+.tab-close:hover { color: #fff; background: #c0392b; }
 .canvas-wrap {
   flex: 1; position: relative; background: #fff; margin: 10px;
   border: 1px solid #e2e5ea; border-radius: 8px; overflow: hidden;

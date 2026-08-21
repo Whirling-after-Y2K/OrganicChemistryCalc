@@ -7,3 +7,4 @@ skills-lock.json
 feature_test.py
 test_render.py
 .venv/
+.vscode

@@ -23,7 +23,9 @@ function toSubscript(text) {
 const viewerApp = createApp({
   data() {
     return {
-      molecule: null,
+      tabs: [],
+      activeTabId: null,
+      nextTabId: 1,
       error: "",
       status: "就绪",
       pathText: "",
@@ -40,6 +42,10 @@ const viewerApp = createApp({
   computed: {
     formulaHtml() {
       return this.molecule ? toSubscript(this.molecule.formula) : "";
+    },
+    molecule() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      return tab ? tab.molecule : null;
     },
   },
   mounted() {
@@ -101,13 +107,73 @@ const viewerApp = createApp({
           this.status = "";
           return;
         }
-        this.molecule = data.molecule;
-        this.status = "已加载：" + (data.molecule.source || "");
-        this.$nextTick(() => this.fitView());
+        const loaded = data.molecule;
+        const source = loaded.source || "";
+        const existing = this.tabs.find((t) => t.source === source);
+        if (existing) {
+          this.activeTabId = existing.id;
+          this.status = "已激活：" + source;
+          this.restoreActiveView();
+          this.render();
+        } else {
+          const tab = {
+            id: this.nextTabId++,
+            source: source,
+            name: loaded.name || "",
+            formula: loaded.formula || "",
+            molecule: loaded,
+            view: { zoom: 1, panX: 0, panY: 0 },
+          };
+          this.tabs.push(tab);
+          this.activeTabId = tab.id;
+          this.status = "已加载：" + source;
+          this.$nextTick(() => this.fitView());
+        }
       } catch (err) {
         this.error = "请求失败：" + err.message;
         this.status = "";
       }
+    },
+
+    // ---- 标签页 ----
+    saveActiveView() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (tab) {
+        tab.view.zoom = this.zoom;
+        tab.view.panX = this.panX;
+        tab.view.panY = this.panY;
+      }
+    },
+    restoreActiveView() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (tab) {
+        this.zoom = tab.view.zoom;
+        this.panX = tab.view.panX;
+        this.panY = tab.view.panY;
+      } else {
+        this.zoom = 1;
+        this.panX = 0;
+        this.panY = 0;
+      }
+    },
+    switchTab(id) {
+      if (id === this.activeTabId) return;
+      this.saveActiveView();
+      this.activeTabId = id;
+      this.restoreActiveView();
+      this.render();
+    },
+    closeTab(id) {
+      const index = this.tabs.findIndex((t) => t.id === id);
+      if (index < 0) return;
+      const wasActive = id === this.activeTabId;
+      this.tabs.splice(index, 1);
+      if (wasActive) {
+        const next = this.tabs[Math.min(index, this.tabs.length - 1)];
+        this.activeTabId = next ? next.id : null;
+        this.restoreActiveView();
+      }
+      this.render();
     },
 
     // ---- 画布尺寸与事件 ----

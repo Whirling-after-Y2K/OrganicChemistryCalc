@@ -25,6 +25,21 @@
   </header>
 
   <main class="layout">
+    <nav class="tabs">
+      <div v-if="!tabs.length" class="tabs-empty">暂无标签<br>打开分子后显示在这里</div>
+      <button
+        v-for="t in tabs"
+        :key="t.id"
+        class="tab"
+        :class="{ active: t.id === activeTabId }"
+        :title="t.source"
+        @click="switchTab(t.id)"
+      >
+        <span class="tab-main">{{ t.name || t.source }}</span>
+        <span class="tab-formula">{{ t.formula }}</span>
+        <span class="tab-close" title="关闭" @click.stop="closeTab(t.id)">×</span>
+      </button>
+    </nav>
     <section class="canvas-wrap" @dragover.prevent @drop.prevent="onDropFile">
       <canvas ref="canvas"></canvas>
     </section>
