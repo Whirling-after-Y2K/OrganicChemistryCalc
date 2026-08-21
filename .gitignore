@@ -6,3 +6,4 @@ skills-lock.json
 .agents
 feature_test.py
 test_render.py
+.venv/

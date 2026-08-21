@@ -268,8 +268,16 @@ const viewerApp = createApp({
       ctx.font = "600 " + fontSize + "px 'Segoe UI', Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.lineWidth = Math.max(0.5, fontSize * 0.2);
-      ctx.strokeStyle = "rgba(255,255,255,0.92)";
+      // 不透明背景椭圆：完全遮住穿过后方的键线（含字母间空隙与边缘）
+      const textWidth = ctx.measureText(label).width;
+      const pad = fontSize * 0.08;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.ellipse(x, y, textWidth / 2 + pad, fontSize / 2 + pad, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 白色描边兜底：防止字形抗锯齿边缘透出键线
+      ctx.lineWidth = Math.max(0.3, fontSize * 0.03);
+      ctx.strokeStyle = "#ffffff";
       ctx.strokeText(label, x, y);
       ctx.fillStyle = color;
       ctx.fillText(label, x, y);
