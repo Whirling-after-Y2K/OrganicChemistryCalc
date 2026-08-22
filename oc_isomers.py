@@ -20,12 +20,15 @@
 - 性能：可片段化的多原子基团（羧基/酯基/醛基/酮羰基/酰胺键/碳碳双键/三键）
   作为预建片段参与枚举，约束搜索秒级完成；搜索规模守卫（时间/节点双上限）
   防止无约束大分子枚举挂死。
+- 等位氢约束：可要求异构体的等位氢模式（NMR 峰面积比）与期望一致，
+  一律按公约数约分后比较；构建前用逐原子氢数多重集做必要条件预检。
 - 输出：全部同分异构体（含输入结构本身的隐氢形式），按结构指纹稳定排序。
 """
 
 from __future__ import annotations
 
 import os
+import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -297,20 +300,84 @@ def _contains_groups(molecule: oc.Molecule, resolved: frozenset[str]) -> bool:
     return all(_group_present(names, name) for name in resolved)
 
 
+def _reduce_hydrogen_pattern(seq: Sequence[int]) -> tuple[int, ...]:
+    """按最大公约数约分等位氢模式；空序列保持空（表示无氢）。"""
+    values = tuple(int(value) for value in seq)
+    if not values:
+        return ()
+    divisor = 0
+    for value in values:
+        divisor = math.gcd(divisor, value)
+    return tuple(value // divisor for value in values)
+
+
+def _resolve_equivalent_hydrogens(
+    equivalent_hydrogens: Sequence[int] | None,
+) -> tuple[int, ...] | None:
+    """校验并约分等位氢期望模式；None 表示不加约束。"""
+    if equivalent_hydrogens is None:
+        return None
+    values = list(equivalent_hydrogens)
+    if any(not isinstance(value, int) or value <= 0 for value in values):
+        raise ValueError("等位氢模式必须为正整数序列（允许空序列表示不含氢）")
+    return _reduce_hydrogen_pattern(values)
+
+
+def _h_multiset_fits(
+    h_values: Sequence[int],
+    class_sizes: Sequence[int],
+) -> bool:
+    """逐原子终态氢数能否按期望类大小分组（等位氢必要条件）。
+
+    同一等价类内各原子终态氢数相同；类大小 = 组内原子数 × 氢数（如甲苯
+    的 CH3 类是 1 个原子 × 3 H，邻位类是 2 个原子 × 1 H）。判定等价于：
+    把每个类大小 s 分配到某个氢值 v（要求 s 是 v 的整数倍），该值的原子
+    被消耗 s/v 个，最终每个氢值的原子恰好用完。
+    """
+    values = sorted({value for value in h_values if value > 0}, reverse=True)
+    if not values:
+        return not class_sizes
+    remaining = {value: sum(1 for h in h_values if h == value) for value in values}
+    if sum(value * count for value, count in remaining.items()) != sum(class_sizes):
+        return False
+    sizes = sorted(class_sizes, reverse=True)
+
+    def backtrack(index: int) -> bool:
+        if index == len(sizes):
+            return True
+        size = sizes[index]
+        for value in values:
+            if size % value != 0:
+                continue
+            need = size // value
+            if remaining[value] >= need:
+                remaining[value] -= need
+                if backtrack(index + 1):
+                    return True
+                remaining[value] += need
+        return False
+
+    return backtrack(0)
+
+
 def find_isomers(
     molecule: oc.Molecule,
     required_groups: Sequence[str] | None = None,
+    equivalent_hydrogens: Sequence[int] | None = None,
 ) -> list[oc.Molecule]:
     """返回分子的全部同分异构体（含输入结构本身的隐氢形式）。
 
     - 结果按 (tuple(feature), 生成序) 稳定排序，已按结构判等去重；
     - required_groups 指定必须含有的基团名称（每种至少 1 个），
       未知名称抛 ValueError；分子式层面不可能时直接返回空列表；
+    - equivalent_hydrogens 指定期望的等位氢模式（按公约数约分后比较），
+      含非正整数抛 ValueError；
     - 重原子数超过 MAX_HEAVY_ATOMS 抛 ValueError；
     - 无法用隐氢模型表示的分子（如 H2、HF）退化为仅返回输入本身；
     - 可含苯环的分子式只枚举含苯环/硝基的结构族（高中口径）。
     """
     resolved = _resolve_required_groups(required_groups)
+    h_pattern = _resolve_equivalent_hydrogens(equivalent_hydrogens)
     molecule.validate()
     target = dict(molecule.formula)
     heavy = _heavy_counts(molecule)
@@ -321,6 +388,22 @@ def find_isomers(
     dbe = _formula_dbe(target)
     if not _formula_possible(resolved, heavy, dbe, target):
         return []
+    target_h = target.get('h', 0)
+    if h_pattern is not None:
+        if h_pattern:
+            pattern_sum = sum(h_pattern)
+            if target_h == 0 or target_h % pattern_sum != 0:
+                return []
+            scale = target_h // pattern_sum
+            h_classes: tuple[int, ...] | None = tuple(
+                scale * value for value in h_pattern
+            )
+        else:
+            if target_h != 0:
+                return []
+            h_classes = ()
+    else:
+        h_classes = None
 
     fragments = tuple(
         spec for name, spec in _FRAGMENT_SPECS.items() if name in resolved
@@ -345,7 +428,8 @@ def find_isomers(
                 )
                 for k_n in range(nitro_min, max_nitro + 1):
                     _collect_mode(
-                        k_b, k_n, fragments, heavy, target, resolved, budget, collected
+                        k_b, k_n, fragments, heavy, target, resolved, h_classes,
+                        budget, collected,
                     )
             if not collected and not resolved:
                 # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式（仅无约束）
@@ -354,7 +438,8 @@ def find_isomers(
                     if k_n > 0 and heavy.get('c', 0) == 0:
                         continue
                     _collect_mode(
-                        0, k_n, fragments, heavy, target, resolved, budget, collected
+                        0, k_n, fragments, heavy, target, resolved, h_classes,
+                        budget, collected,
                     )
         else:
             max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe - frag_dbe)
@@ -362,7 +447,8 @@ def find_isomers(
                 if k_n > 0 and heavy.get('c', 0) == 0:
                     continue
                 _collect_mode(
-                    0, k_n, fragments, heavy, target, resolved, budget, collected
+                    0, k_n, fragments, heavy, target, resolved, h_classes,
+                    budget, collected,
                 )
 
     buckets: dict[tuple[str, ...], list[oc.Molecule]] = {}
@@ -374,11 +460,17 @@ def find_isomers(
             continue
         bucket.append(candidate)
         results.append(candidate)
-    if resolved:
-        # 先去重再过滤：functional_groups 只对唯一结构运行，避免大量重复候选重复检测
+    if resolved or h_pattern is not None:
+        # 先去重再过滤：官能团/等位氢检测只对唯一结构运行
         results = [
             candidate for candidate in results
-            if _contains_groups(candidate, resolved)
+            if (not resolved or _contains_groups(candidate, resolved))
+            and (
+                h_pattern is None
+                or _reduce_hydrogen_pattern(
+                    candidate.equivalent_hydrogen_groups
+                ) == h_pattern
+            )
         ]
     results.sort(key=lambda item: tuple(item.feature))
     return results
@@ -391,6 +483,7 @@ def _collect_mode(
     heavy: dict[str, int],
     target: dict[str, int],
     resolved: frozenset[str],
+    h_classes: tuple[int, ...] | None,
     budget: _NodeBudget,
     collected: list[oc.Molecule],
 ) -> None:
@@ -526,6 +619,12 @@ def _collect_mode(
             return
         # 氢数预检：不再有成键空间，隐氢数已定，与目标不符则公式必不匹配
         if current_h() != target_h:
+            return
+        # 等位氢预检：逐原子终态氢数必须能按期望类大小分组成同值组
+        if h_classes is not None and not _h_multiset_fits(
+            [max(0, h0[i] - (used[i] - base[i])) for i in range(n)],
+            h_classes,
+        ):
             return
         # 片段最少外部键预检（如酯基桥氧必须连碳，跳过必被过滤的甲酸酯/羧基型）
         for index, need in enumerate(min_ext):
@@ -814,9 +913,12 @@ def _collect_mode(
 def isomer_report(
     molecule: oc.Molecule,
     required_groups: Sequence[str] | None = None,
+    equivalent_hydrogens: Sequence[int] | None = None,
 ) -> str:
     """控制台文字报告：分子式、基团约束、总数、每个异构体的编号/分子式/不饱和度/环数。"""
-    isomers = find_isomers(molecule, required_groups)
+    isomers = find_isomers(
+        molecule, required_groups, equivalent_hydrogens=equivalent_hydrogens
+    )
     lines: list[str] = [f"分子式：{_display_formula(molecule.formula)}"]
     if required_groups:
         lines.append(f"基团约束：{'、'.join(dict.fromkeys(required_groups))}")
@@ -834,12 +936,15 @@ def save_isomers(
     molecule: oc.Molecule,
     directory: str | os.PathLike[str],
     required_groups: Sequence[str] | None = None,
+    equivalent_hydrogens: Sequence[int] | None = None,
 ) -> list[Path]:
     """把全部异构体保存为构建脚本（oc_io），返回文件路径列表。
 
     目录结构：<directory>/<公式键>/isomer_01.py、isomer_02.py...
     """
-    isomers = find_isomers(molecule, required_groups)
+    isomers = find_isomers(
+        molecule, required_groups, equivalent_hydrogens=equivalent_hydrogens
+    )
     folder = Path(directory) / _formula_key(molecule.formula)
     folder.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
