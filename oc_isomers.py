@@ -17,13 +17,18 @@
 - 基团约束：可要求搜索结果必须含有指定基团（复用 oc_features 的基团检测）。
   苯环/硝基在模式层剪枝，其余基团在 DFS 中用必要条件剪枝（宁可少剪，
   不可剪错），枚举后统一用 functional_groups 过滤作为最终准确保证。
+- 性能：可片段化的多原子基团（羧基/酯基/醛基/酮羰基/酰胺键/碳碳双键/三键）
+  作为预建片段参与枚举，约束搜索秒级完成；搜索规模守卫（时间/节点双上限）
+  防止无约束大分子枚举挂死。
 - 输出：全部同分异构体（含输入结构本身的隐氢形式），按结构指纹稳定排序。
 """
 
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import oc_io
@@ -31,6 +36,13 @@ import oc_features
 import organic_chemistry as oc
 
 MAX_HEAVY_ATOMS: int = 12
+
+# 搜索规模守卫（防止无约束大分子枚举挂死）：
+# - MAX_SEARCH_SECONDS：墙钟时间兜底（主守卫），超过即报错并给出引导；
+# - MAX_SEARCH_NODES：节点预算（次守卫），防止单节点极慢的异常情况。
+# 校准：C8H8O2（10 重原子）无约束约 23s 可通过；C9/C10 无约束在约 30s 内报错。
+MAX_SEARCH_NODES: int = 1_500_000
+MAX_SEARCH_SECONDS: float = 30.0
 
 # 单价元素：隐氢模型无法承载氢（如 HF/HCl），此类分子退化为仅输入本身
 _MONOVALENT: frozenset[str] = frozenset({"f", "cl", "br", "i"})
@@ -51,6 +63,96 @@ _GROUP_HALO: str = "卤代烃"
 _GROUP_DOUBLE: str = "碳碳双键"
 _GROUP_TRIPLE: str = "碳碳三键"
 _GROUP_HYDROXY_ALIAS: str = "羟基"
+
+
+class _NodeBudget:
+    """搜索规模守卫：节点数或墙钟时间超限抛 ValueError。"""
+
+    def __init__(self, limit: int, seconds: float) -> None:
+        self.limit: int = limit
+        self.seconds: float = seconds
+        self.count: int = 0
+        self._start: float = time.monotonic()
+
+    def visit(self) -> None:
+        self.count += 1
+        if self.count > self.limit or (
+            self.count & 4095 == 0
+            and time.monotonic() - self._start > self.seconds
+        ):
+            raise ValueError(
+                f"异构体搜索空间过大（已访问 {self.count} 个搜索节点，超过上限 "
+                f"{self.limit} 或 {self.seconds:.0f} 秒）。建议：改用基团约束"
+                "（required_groups，如['酯基']）缩小范围，或减小分子规模；"
+                "如需放宽可调大 oc_isomers.MAX_SEARCH_SECONDS / MAX_SEARCH_NODES。"
+            )
+
+
+@dataclass(frozen=True)
+class _FragmentSpec:
+    """预建片段：固定内部结构 + 原子属性（元素/价键上限/基础占用/隐氢基数）。"""
+
+    name: str
+    atoms: tuple[tuple[str, int, int, int], ...]
+    bonds: tuple[tuple[int, int, int], ...]
+    dbe: int
+    min_external: tuple[int, ...] = ()
+
+
+# 可片段化的多原子基团（"至少含 1 个"语义下每个片段 k=1 即完备）：
+# 羧基 / 酯基 / 酰胺键 = C=O + 桥接原子（DBE+1）；
+# 醛基与酮羰基共用 C=O 片段（区别由后过滤判定）；双键 DBE+1；三键 DBE+2。
+_FRAGMENT_SPECS: dict[str, _FragmentSpec] = {
+    _GROUP_CARBOXYL: _FragmentSpec(
+        _GROUP_CARBOXYL,
+        (("c", 4, 3, 1), ("o", 2, 2, 0), ("o", 2, 1, 1)),
+        ((0, 1, 2), (0, 2, 1)),
+        1,
+    ),
+    _GROUP_ESTER: _FragmentSpec(
+        _GROUP_ESTER,
+        (("c", 4, 3, 1), ("o", 2, 2, 0), ("o", 2, 1, 1)),
+        ((0, 1, 2), (0, 2, 1)),
+        1,
+        (1, 0, 1),
+    ),
+    _GROUP_ALDEHYDE: _FragmentSpec(
+        _GROUP_ALDEHYDE,
+        (("c", 4, 2, 2), ("o", 2, 2, 0)),
+        ((0, 1, 2),),
+        1,
+    ),
+    _GROUP_KETONE: _FragmentSpec(
+        _GROUP_KETONE,
+        (("c", 4, 2, 2), ("o", 2, 2, 0)),
+        ((0, 1, 2),),
+        1,
+    ),
+    _GROUP_AMIDE: _FragmentSpec(
+        _GROUP_AMIDE,
+        (("c", 4, 3, 1), ("o", 2, 2, 0), ("n", 3, 1, 2)),
+        ((0, 1, 2), (0, 2, 1)),
+        1,
+    ),
+    _GROUP_DOUBLE: _FragmentSpec(
+        _GROUP_DOUBLE,
+        (("c", 4, 2, 2), ("c", 4, 2, 2)),
+        ((0, 1, 2),),
+        1,
+    ),
+    _GROUP_TRIPLE: _FragmentSpec(
+        _GROUP_TRIPLE,
+        (("c", 4, 3, 1), ("c", 4, 3, 1)),
+        ((0, 1, 3),),
+        2,
+    ),
+}
+
+# 单原子基团：暂不片段化（对搜索空间收缩有限），保留谓词剪枝并受守卫保护
+_SINGLE_ATOM_GROUPS: frozenset[str] = frozenset({
+    _GROUP_ALCOHOL_OH, _GROUP_PHENOL_OH, _GROUP_HYDROXY_ALIAS,
+    _GROUP_AMINO, _GROUP_ETHER, _GROUP_HALO,
+})
 
 # 公开的合法基团名称（含"羟基"别名），供调用方与后续 UI 选择
 REQUIRED_GROUP_NAMES: tuple[str, ...] = tuple(
@@ -220,6 +322,11 @@ def find_isomers(
     if not _formula_possible(resolved, heavy, dbe, target):
         return []
 
+    fragments = tuple(
+        spec for name, spec in _FRAGMENT_SPECS.items() if name in resolved
+    )
+    budget = _NodeBudget(MAX_SEARCH_NODES, MAX_SEARCH_SECONDS)
+    frag_dbe = sum(spec.dbe for spec in fragments)
     collected: list[oc.Molecule] = []
     if total_heavy == 0 or (
         all(element in _MONOVALENT for element in heavy) and target.get('h', 0) > 0
@@ -230,31 +337,33 @@ def find_isomers(
         benzene_capable = heavy.get('c', 0) >= 6 and dbe >= 4
         if benzene_capable:
             for k_b in range(1, heavy.get('c', 0) // 6 + 1):
-                budget = dbe - 4 * k_b
-                if budget < 0:
+                mode_budget = dbe - 4 * k_b - frag_dbe
+                if mode_budget < 0:
                     continue
-                max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, budget)
+                max_nitro = min(
+                    heavy.get('n', 0), heavy.get('o', 0) // 2, mode_budget
+                )
                 for k_n in range(nitro_min, max_nitro + 1):
-                    _collect_mode(k_b, k_n, heavy, target, resolved, collected)
-            if not collected and _GROUP_RING not in resolved and _GROUP_PHENOL_OH not in resolved:
-                # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式
-                max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe)
+                    _collect_mode(
+                        k_b, k_n, fragments, heavy, target, resolved, budget, collected
+                    )
+            if not collected and not resolved:
+                # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式（仅无约束）
+                max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe - frag_dbe)
                 for k_n in range(nitro_min, max_nitro + 1):
                     if k_n > 0 and heavy.get('c', 0) == 0:
                         continue
-                    _collect_mode(0, k_n, heavy, target, resolved, collected)
+                    _collect_mode(
+                        0, k_n, fragments, heavy, target, resolved, budget, collected
+                    )
         else:
-            max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe)
+            max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe - frag_dbe)
             for k_n in range(nitro_min, max_nitro + 1):
                 if k_n > 0 and heavy.get('c', 0) == 0:
                     continue
-                _collect_mode(0, k_n, heavy, target, resolved, collected)
-
-    if resolved:
-        collected = [
-            candidate for candidate in collected
-            if _contains_groups(candidate, resolved)
-        ]
+                _collect_mode(
+                    0, k_n, fragments, heavy, target, resolved, budget, collected
+                )
 
     buckets: dict[tuple[str, ...], list[oc.Molecule]] = {}
     results: list[oc.Molecule] = []
@@ -265,6 +374,12 @@ def find_isomers(
             continue
         bucket.append(candidate)
         results.append(candidate)
+    if resolved:
+        # 先去重再过滤：functional_groups 只对唯一结构运行，避免大量重复候选重复检测
+        results = [
+            candidate for candidate in results
+            if _contains_groups(candidate, resolved)
+        ]
     results.sort(key=lambda item: tuple(item.feature))
     return results
 
@@ -272,16 +387,18 @@ def find_isomers(
 def _collect_mode(
     k_b: int,
     k_n: int,
+    fragments: tuple[_FragmentSpec, ...],
     heavy: dict[str, int],
     target: dict[str, int],
     resolved: frozenset[str],
+    budget: _NodeBudget,
     collected: list[oc.Molecule],
 ) -> None:
-    """枚举含 k_b 个苯环基团、k_n 个硝基基团的所有候选。
+    """枚举含 k_b 个苯环、k_n 个硝基与 fragments 中各 1 个片段的所有候选。
 
-    递归原子清单：先苯环槽位（6k_b 个，容量 1），再硝基 N（k_n 个，容量 1），
-    最后按元素排序的剩余自由原子。苯环/硝基内部结构固定，不参与成键递归。
-    resolved 为必需基团的展开集合，用于 DFS 过程必要条件剪枝。
+    递归原子清单：苯环槽位（6k_b 个）→ 硝基 N（k_n 个）→ 片段原子 →
+    按元素排序的剩余自由原子。苯环/硝基/片段内部结构固定，不参与成键递归。
+    resolved 中未片段化的单原子基团仍走谓词剪枝；budget 为节点预算守卫。
     """
     elements: list[str] = []
     limits: list[int] = []
@@ -289,7 +406,10 @@ def _collect_mode(
     h0: list[int] = []
     is_nitro: list[bool] = []
     is_slot: list[bool] = []
+    is_free: list[bool] = []
+    min_ext: list[int] = []
     ring_id: list[int] = []
+    frag_starts: list[int] = []
     for index in range(6 * k_b):
         elements.append('c')
         limits.append(4)
@@ -297,6 +417,8 @@ def _collect_mode(
         h0.append(1)
         is_nitro.append(False)
         is_slot.append(True)
+        is_free.append(False)
+        min_ext.append(0)
         ring_id.append(index // 6)
     for _ in range(k_n):
         elements.append('n')
@@ -305,11 +427,31 @@ def _collect_mode(
         h0.append(1)
         is_nitro.append(True)
         is_slot.append(False)
+        is_free.append(False)
+        min_ext.append(0)
         ring_id.append(-1)
+    for spec in fragments:
+        frag_starts.append(len(elements))
+        for index, (element, limit, base_used, h_zero) in enumerate(spec.atoms):
+            elements.append(element)
+            limits.append(limit)
+            base.append(base_used)
+            h0.append(h_zero)
+            is_nitro.append(False)
+            is_slot.append(False)
+            is_free.append(False)
+            need = spec.min_external[index] if index < len(spec.min_external) else 0
+            min_ext.append(need)
+            ring_id.append(-1)
     remaining: dict[str, int] = {element: count for element, count in heavy.items()}
     remaining['c'] = remaining.get('c', 0) - 6 * k_b
     remaining['n'] = remaining.get('n', 0) - k_n
     remaining['o'] = remaining.get('o', 0) - 2 * k_n
+    for spec in fragments:
+        for element, _limit, _base_used, _h_zero in spec.atoms:
+            remaining[element] = remaining.get(element, 0) - 1
+    if any(count < 0 for count in remaining.values()):
+        return  # 原子预算不足，跳过该模式
     for element in sorted(remaining):
         for _ in range(remaining[element]):
             elements.append(element)
@@ -319,13 +461,15 @@ def _collect_mode(
             h0.append(limit if limit >= 2 else 0)
             is_nitro.append(False)
             is_slot.append(False)
+            is_free.append(True)
+            min_ext.append(0)
             ring_id.append(-1)
     n = len(elements)
     if n == 0:
         return
     target_h = target.get('h', 0)
     target_dbe = _formula_dbe(target)
-    base_dbe = 4 * k_b + k_n
+    base_dbe = 4 * k_b + k_n + sum(spec.dbe for spec in fragments)
 
     used: list[int] = list(base)
     bond_count: list[int] = [0] * n
@@ -342,8 +486,12 @@ def _collect_mode(
             total += max(0, h0[index] - (used[index] - base[index]))
         return total
 
-    def count_rings() -> int:
-        """当前已形成环数（含基团初始连通带来的环，通过并查集判定）。"""
+    def graph_state() -> tuple[int, bool]:
+        """返回 (当前已形成环数, 递归原子是否全部连通)。
+
+        并查集初始并入苯环内部、片段内部键，再并入已分配的键；
+        环数用于不饱和度剪枝，连通性用于完成态构建前的廉价预检。
+        """
         parent = list(range(n))
 
         def find(x: int) -> int:
@@ -358,6 +506,9 @@ def _collect_mode(
             for other in range(index + 1, n):
                 if is_slot[other] and ring_id[index] == ring_id[other]:
                     parent[find(other)] = find(index)
+        for start, spec in zip(frag_starts, fragments):
+            for a, b, _order in spec.bonds:
+                parent[find(start + b)] = find(start + a)
         rings = 0
         for a, b, _order in bonds:
             root_a, root_b = find(a), find(b)
@@ -365,9 +516,21 @@ def _collect_mode(
                 rings += 1
             else:
                 parent[root_b] = root_a
-        return rings
+        root = find(0)
+        connected = all(find(i) == root for i in range(n))
+        return rings, connected
 
     def build_leaf() -> None:
+        # 完成态预检：当前键已固定，递归原子未全连通则不可能成合法分子
+        if not graph_state()[1]:
+            return
+        # 氢数预检：不再有成键空间，隐氢数已定，与目标不符则公式必不匹配
+        if current_h() != target_h:
+            return
+        # 片段最少外部键预检（如酯基桥氧必须连碳，跳过必被过滤的甲酸酯/羧基型）
+        for index, need in enumerate(min_ext):
+            if need > 0 and bond_count[index] < need:
+                return
         molecule = oc.Molecule()
         ring_atoms: list[oc.Atom] = []
         for _ in range(k_b):
@@ -385,11 +548,25 @@ def _collect_mode(
             oc.add_bond(n_atom, o2)
             oc.add_pi_system([n_atom, o1, o2])
             nitro_groups.append((n_atom, o1, o2))
+        fragment_atom_lists: list[list[oc.Atom]] = []
+        for spec in fragments:
+            frag_atoms = [
+                oc.Atom(element, molecule)
+                for element, _limit, _base_used, _h_zero in spec.atoms
+            ]
+            for a, b, order in spec.bonds:
+                oc.add_bond(frag_atoms[a], frag_atoms[b], order)
+            fragment_atom_lists.append(frag_atoms)
         free_atoms: list[oc.Atom] = []
         for element in sorted(remaining):
             for _ in range(remaining[element]):
                 free_atoms.append(oc.Atom(element, molecule))
-        atoms = ring_atoms + [group[0] for group in nitro_groups] + free_atoms
+        atoms = (
+            ring_atoms
+            + [group[0] for group in nitro_groups]
+            + [atom for frag in fragment_atom_lists for atom in frag]
+            + free_atoms
+        )
         try:
             for a, b, order in bonds:
                 oc.add_bond(atoms[a], atoms[b], order)
@@ -413,52 +590,6 @@ def _collect_mode(
         if is_slot[a] and is_slot[b] and ring_id[a] == ring_id[b]:
             return False
         return caps[a] >= 1 and caps[b] >= 1
-
-    def exact_bond_possible(
-        e1: str,
-        e2: str,
-        order: int,
-        dbe_need: int,
-        caps: list[int],
-        pending: list[tuple[int, int]],
-        dbe_left: int,
-    ) -> bool:
-        """已存在或仍可形成指定元素间指定键级的键（如 C=C、C≡C）。"""
-        for a, b, o in bonds:
-            if o == order and {elements[a], elements[b]} == {e1, e2}:
-                return True
-        if dbe_left < dbe_need:
-            return False
-        for a, b in pending:
-            if (
-                bondable(a, b, caps)
-                and caps[a] >= order
-                and caps[b] >= order
-                and {elements[a], elements[b]} == {e1, e2}
-            ):
-                return True
-        return False
-
-    def carbonyl_possible(
-        caps: list[int],
-        pending: list[tuple[int, int]],
-        dbe_left: int,
-    ) -> bool:
-        """已存在或仍可形成 C=O 双键。"""
-        for a, b, o in bonds:
-            if o == 2 and {elements[a], elements[b]} == {'c', 'o'}:
-                return True
-        if dbe_left < 1:
-            return False
-        for a, b in pending:
-            if (
-                bondable(a, b, caps)
-                and caps[a] >= 2
-                and caps[b] >= 2
-                and {elements[a], elements[b]} == {'c', 'o'}
-            ):
-                return True
-        return False
 
     def has_carbon_neighbor(index: int) -> bool:
         """已分配的键中是否与碳相邻。"""
@@ -493,7 +624,7 @@ def _collect_mode(
     ) -> bool:
         """存在可成为 O-H 的游离 O（当前占用 <=1，已连碳或可连碳）。"""
         for a in range(n):
-            if elements[a] != 'o' or used[a] > 1:
+            if not is_free[a] or elements[a] != 'o' or used[a] > 1:
                 continue
             if has_carbon_neighbor(a) or pending_carbon_pair(a, caps, pending):
                 return True
@@ -505,7 +636,7 @@ def _collect_mode(
     ) -> bool:
         """存在可挂氢且连碳的游离 N（当前占用 <=2）。"""
         for a in range(n):
-            if elements[a] != 'n' or used[a] > 2:
+            if not is_free[a] or elements[a] != 'n' or used[a] > 2:
                 continue
             if has_carbon_neighbor(a) or pending_carbon_pair(a, caps, pending):
                 return True
@@ -517,7 +648,7 @@ def _collect_mode(
     ) -> bool:
         """存在可连两个碳的 O（醚键 / 酯桥）。"""
         for a in range(n):
-            if elements[a] != 'o' or used[a] > 2:
+            if not is_free[a] or elements[a] != 'o' or used[a] > 2:
                 continue
             c_bonds = 0
             for x, y, o in bonds:
@@ -548,7 +679,7 @@ def _collect_mode(
         if k_b == 0:
             return False
         for a in range(n):
-            if elements[a] != 'o' or used[a] > 1:
+            if not is_free[a] or elements[a] != 'o' or used[a] > 1:
                 continue
             slot_bonded = False
             for x, y, o in bonds:
@@ -593,11 +724,6 @@ def _collect_mode(
         if not resolved:
             return True
         caps = [limits[i] - used[i] for i in range(n)]
-        dbe_left = (
-            target_dbe - base_dbe
-            - sum(order - 1 for _, _, order in bonds)
-            - count_rings()
-        )
         pending = pairs[pos:]
         for name in resolved:
             if name == _GROUP_RING:
@@ -605,42 +731,6 @@ def _collect_mode(
                     return False
             elif name == _GROUP_NITRO:
                 if k_n == 0:
-                    return False
-            elif name == _GROUP_DOUBLE:
-                if not exact_bond_possible('c', 'c', 2, 1, caps, pending, dbe_left):
-                    return False
-            elif name == _GROUP_TRIPLE:
-                if not exact_bond_possible('c', 'c', 3, 2, caps, pending, dbe_left):
-                    return False
-            elif name == _GROUP_ALDEHYDE:
-                if not carbonyl_possible(caps, pending, dbe_left):
-                    return False
-                if not any(
-                    elements[a] == 'c'
-                    and max(0, h0[a] - (used[a] - base[a])) >= 1
-                    for a in range(n)
-                ):
-                    return False
-            elif name == _GROUP_CARBOXYL:
-                if not (
-                    carbonyl_possible(caps, pending, dbe_left)
-                    and free_o_oh_possible(caps, pending)
-                ):
-                    return False
-            elif name == _GROUP_ESTER:
-                if not (
-                    carbonyl_possible(caps, pending, dbe_left)
-                    and ether_o_possible(caps, pending)
-                ):
-                    return False
-            elif name == _GROUP_AMIDE:
-                if not (
-                    carbonyl_possible(caps, pending, dbe_left)
-                    and free_n_amino_possible(caps, pending)
-                ):
-                    return False
-            elif name == _GROUP_KETONE:
-                if not carbonyl_possible(caps, pending, dbe_left):
                     return False
             elif name == _GROUP_ALCOHOL_OH:
                 if not free_o_oh_possible(caps, pending):
@@ -666,6 +756,7 @@ def _collect_mode(
         return True
 
     def backtrack(i: int, j: int, pos: int) -> None:
+        budget.visit()
         if i == n:
             build_leaf()
             return
@@ -683,11 +774,13 @@ def _collect_mode(
             if is_nitro[i]:
                 if partner[i] < 0 or elements[partner[i]] != 'c':
                     return
-            elif not is_slot[i] and n > 1 and bond_count[i] == 0:
+            elif is_free[i] and n > 1 and bond_count[i] == 0:
+                return
+            elif min_ext[i] > 0 and bond_count[i] < min_ext[i]:
                 return
             backtrack(i + 1, i + 2, pos)
             return
-        if base_dbe + sum(order - 1 for _, _, order in bonds) + count_rings() > target_dbe:
+        if base_dbe + sum(order - 1 for _, _, order in bonds) + graph_state()[0] > target_dbe:
             return
         if not feasible(pos):
             return
