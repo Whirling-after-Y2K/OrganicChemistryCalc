@@ -177,6 +177,45 @@ class Molecule:
         assert self._snapshot is not None
         return list(self._snapshot.feature)
 
+    @property
+    def equivalent_hydrogen_groups(self) -> list[int]:
+        """等位氢分组：每种化学环境的氢原子个数列表。
+
+        等位氢 = 同一原子上的全部氢（隐氢 / 显式 H / ActiveH 合并），
+        以及可被自同构相互映对的等价原子上的氢；按连通分量分别计算，
+        避免把不同分子的氢误并为一组。结果按个数降序排列（同个数按
+        分子内原子首次出现顺序），例如乙醇 → [3, 2, 1]。
+        计算前先校验结构（validate），无效结构抛 ValueError。
+        """
+        self.validate()
+        if not self.atoms:
+            return []
+        colors: dict[Atom, AtomLabel]
+        if self._snapshot is not None:
+            colors = self._snapshot.labels
+        else:
+            colors = _wl_labels(self)
+        orbit_id = _automorphism_orbits(self, colors)
+        counts: dict[int, int] = {}
+        first_index: dict[int, int] = {}
+        for index, atom in enumerate(self.atoms):
+            if atom.name != 'h':
+                total = _total_h(atom)
+                if total <= 0:
+                    continue
+                gid = orbit_id[atom]
+            else:
+                # 显式 H 节点：挂在非氢原子上时由宿主原子统一计数；
+                # 否则（如 H2、孤立 H）按自身轨道自成一组。
+                if any(bond.other(atom).name != 'h' for bond in atom.bonds):
+                    continue
+                gid = orbit_id[atom]
+                total = 1
+            counts[gid] = counts.get(gid, 0) + total
+            first_index.setdefault(gid, index)
+        ordered = sorted(counts, key=lambda gid: (-counts[gid], first_index[gid]))
+        return [counts[gid] for gid in ordered]
+
     # ---- 内置方法 ----
 
     def __eq__(self, other: object) -> bool:
@@ -960,6 +999,7 @@ def _are_isomorphic(
     m2: Molecule,
     colors1: dict[Atom, AtomLabel] | None = None,
     colors2: dict[Atom, AtomLabel] | None = None,
+    fixed: dict[Atom, Atom] | None = None,
 ) -> bool:
     """精确同构判断：WL 颜色剪枝 + VF2 风格回溯确认。
 
@@ -967,6 +1007,8 @@ def _are_isomorphic(
     （dbe 与成员集合）三者一致；供 __eq__ 在 WL 预筛通过后做精确确认。
     colors1/colors2 传入 update() 缓存的 WL 标签时可跳过 validate() 与
     WL 迭代（__eq__ 使用）；缺省时自行校验并计算。
+    fixed 预置起点映射（m1 原子 -> m2 原子，如 {a: b}），用于确认是否
+    存在把 a 映到 b 的（自）同构；固定项会同步初始化 π 体系映射。
     """
     if colors1 is None:
         m1.validate()
@@ -992,6 +1034,29 @@ def _are_isomorphic(
     matched2: set[Atom] = set()
     sys_map: dict[int, int] = {}      # m1 体系序号 -> m2 体系序号
     sys_map_rev: dict[int, int] = {}  # m2 体系序号 -> m1 体系序号
+
+    if fixed is not None:
+        for v1, w in fixed.items():
+            if _initial_label(v1) != _initial_label(w) or colors1[v1] != colors2[w]:
+                return False
+            p1 = atom_pi1.get(v1)
+            p2 = atom_pi2.get(w)
+            if p1 is None:
+                if p2 is not None:
+                    return False
+            else:
+                if p2 is None or p1[1] != p2[1]:
+                    return False
+                if p1[0] in sys_map:
+                    if sys_map[p1[0]] != p2[0]:
+                        return False
+                elif p2[0] in sys_map_rev:
+                    return False
+                else:
+                    sys_map[p1[0]] = p2[0]
+                    sys_map_rev[p2[0]] = p1[0]
+            mapping[v1] = w
+            matched2.add(w)
 
     def feasible(v1: Atom, w: Atom) -> bool:
         """候选 w 是否可与 v1 配对（基于已匹配映射）。"""
@@ -1056,6 +1121,68 @@ def _are_isomorphic(
         return False
 
     return backtrack()
+
+
+def _automorphism_orbits(
+    molecule: Molecule,
+    colors: dict[Atom, AtomLabel],
+) -> dict[Atom, int]:
+    """精确自同构轨道：返回每个原子所属轨道的编号。
+
+    同轨道的原子可被某个自同构相互映对（即严格等价位置）。以 WL 颜色
+    与连通分量剪枝：只在同一分量、同一颜色的原子间两两做“固定映射
+    回溯确认”，因此 WL 标签可能误并的不等价位置会被正确拆开。
+    前置条件：结构已通过 validate()，colors 与之匹配。
+    """
+    comp: dict[Atom, int] = {}
+    next_comp = 0
+    for atom in molecule.atoms:
+        if atom in comp:
+            continue
+        comp[atom] = next_comp
+        stack: list[Atom] = [atom]
+        while stack:
+            current = stack.pop()
+            for bond in current.bonds:
+                neighbor = bond.other(current)
+                if neighbor not in comp:
+                    comp[neighbor] = next_comp
+                    stack.append(neighbor)
+        next_comp += 1
+
+    parent: dict[Atom, Atom] = {atom: atom for atom in molecule.atoms}
+
+    def find(atom: Atom) -> Atom:
+        while parent[atom] is not atom:
+            parent[atom] = parent[parent[atom]]
+            atom = parent[atom]
+        return atom
+
+    def union(a: Atom, b: Atom) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a is not root_b:
+            parent[root_a] = root_b
+
+    groups: dict[tuple[int, AtomLabel], list[Atom]] = {}
+    for atom in molecule.atoms:
+        groups.setdefault((comp[atom], colors[atom]), []).append(atom)
+
+    for group in groups.values():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                if find(a) is find(b):
+                    continue
+                if _are_isomorphic(molecule, molecule, colors, colors, fixed={a: b}):
+                    union(a, b)
+
+    orbit_id: dict[Atom, int] = {}
+    for atom in molecule.atoms:
+        root = find(atom)
+        if root not in orbit_id:
+            orbit_id[root] = len(orbit_id)
+        orbit_id[atom] = orbit_id[root]
+    return orbit_id
 
 
 # ------- 子结构匹配与分子克隆 -------
