@@ -29,7 +29,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Literal, TypeAlias, cast
+from typing import Literal, Sequence, TypeAlias, cast
 
 # ------- 常量 -------
 
@@ -1647,6 +1647,55 @@ def copy_molecule(
         atom_map.clear()
         atom_map.update(mapping)
     return clone
+
+
+def merge_molecules(
+    molecules: Sequence[Molecule],
+    atom_map: dict[Atom, Atom] | None = None,
+    pi_map: dict[PiSystem, PiSystem] | None = None,
+) -> Molecule:
+    """将多个分子合并进同一个新分子容器（多反应物反应的工作分子）。
+
+    合并前逐个校验源分子（validate），无效结构抛 ValueError；合并结果与各
+    源分子拼接一致，保留 ActiveH 子类、键级、π 体系 dbe 与成员顺序，合并后
+    校验一次整体结构。atom_map / pi_map 非 None 时分别填入“源原子 -> 合并
+    原子”“源 π 体系 -> 合并 π 体系”映射（供反应引擎定位副本原子）。
+    """
+    merged = Molecule()
+    atom_mapping: dict[Atom, Atom] = {}
+    pi_mapping: dict[PiSystem, PiSystem] = {}
+    for molecule in molecules:
+        molecule.validate()
+        for atom in molecule.atoms:
+            copy_atom: Atom
+            if isinstance(atom, ActiveH):
+                copy_atom = ActiveH(merged)
+            else:
+                copy_atom = Atom(atom.name, merged)
+            copy_atom._charge = atom._charge
+            atom_mapping[atom] = copy_atom
+        for bond in molecule.bonds:
+            atom1, atom2 = bond.atoms
+            _make_bond(
+                atom_mapping[atom1],
+                atom_mapping[atom2],
+                order=bond.order,
+                stereo=bond.stereo,
+                aromatic=bond.aromatic,
+            )
+        for pi in molecule.pi_systems:
+            members = [atom_mapping[atom] for atom in pi.atoms]
+            new_pi = _make_pi_system(members, dbe=pi.dbe, aromatic=pi.aromatic)
+            merged.pi_systems.append(new_pi)
+            pi_mapping[pi] = new_pi
+    if atom_map is not None:
+        atom_map.clear()
+        atom_map.update(atom_mapping)
+    if pi_map is not None:
+        pi_map.clear()
+        pi_map.update(pi_mapping)
+    merged.validate()
+    return merged
 
 
 def _display_formula(formula: dict[str, int]) -> str:

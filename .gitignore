@@ -11,3 +11,4 @@ test_render.py
 requirements.txt
 test_user
 test_user.py
+test_reactions.py
