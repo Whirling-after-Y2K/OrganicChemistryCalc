@@ -9,6 +9,4 @@ test_render.py
 .venv/
 .vscode
 requirements.txt
-test_user
-test_user.py
-test_reactions.py
+test_*

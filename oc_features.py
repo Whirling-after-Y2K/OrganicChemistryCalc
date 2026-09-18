@@ -243,7 +243,8 @@ def functional_groups(molecule: oc.Molecule) -> list[FunctionalGroup]:
 
     检测前先校验分子结构，无效结构抛 ValueError。同一基团在同一位置
     （core 原子集合相同）的重复匹配合并为一次；异名基团重叠时，
-    具体基团（priority 高）优先保留并抑制被其覆盖的通用基团。
+    仅严格更高优先级的基团抑制低优先级基团；同优先级允许共存
+    （如甲酸酯同时含有酯基与醛基）。
     """
     molecule.validate()
     raw: list[tuple[GroupSpec, oc.SubstructureMatch]] = []
@@ -259,16 +260,22 @@ def functional_groups(molecule: oc.Molecule) -> list[FunctionalGroup]:
 
     kept: list[tuple[GroupSpec, oc.SubstructureMatch]] = []
     covered: dict[oc.Atom, str] = {}
+    covered_priority: dict[oc.Atom, int] = {}
     for spec, match in raw:
         core_atoms = [match.atom_map[p_atom] for p_atom in spec.core]
-        # 苯环占据的环碳不抑制取代基类基团（如氯苯的 卤代烃 与 苯环 共存）
+        # 苯环占据的环碳不抑制取代基类基团（如氯苯的 卤代烃 与 苯环 共存）；
+        # 同优先级不互斥，保证甲酸酯的 醛基/酯基 共同保留。
         if any(
-            atom in covered and covered[atom] != spec.name and covered[atom] != '苯环'
+            atom in covered
+            and covered[atom] != spec.name
+            and covered[atom] != '苯环'
+            and covered_priority[atom] > spec.priority
             for atom in core_atoms
         ):
             continue
         for atom in core_atoms:
             covered.setdefault(atom, spec.name)
+            covered_priority.setdefault(atom, spec.priority)
         kept.append((spec, match))
 
     groups: list[FunctionalGroup] = []

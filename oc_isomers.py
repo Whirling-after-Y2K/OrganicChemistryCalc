@@ -117,7 +117,8 @@ _FRAGMENT_SPECS: dict[str, _FragmentSpec] = {
         (("c", 4, 3, 1), ("o", 2, 2, 0), ("o", 2, 1, 1)),
         ((0, 1, 2), (0, 2, 1)),
         1,
-        (1, 0, 1),
+        # 羰基碳允许 0 个外部键（甲酸酯）；桥氧必须连外部碳，排除羧酸。
+        (0, 0, 1),
     ),
     _GROUP_ALDEHYDE: _FragmentSpec(
         _GROUP_ALDEHYDE,
@@ -626,7 +627,7 @@ def _collect_mode(
             h_classes,
         ):
             return
-        # 片段最少外部键预检（如酯基桥氧必须连碳，跳过必被过滤的甲酸酯/羧基型）
+        # 片段最少外部键预检（如酯基桥氧必须连碳，羧酸型会被跳过）
         for index, need in enumerate(min_ext):
             if need > 0 and bond_count[index] < need:
                 return
@@ -897,6 +898,8 @@ def _collect_mode(
                 bonds.append((i, j, order))
                 if is_nitro[i]:
                     partner[i] = j
+                if is_nitro[j]:
+                    partner[j] = i
             backtrack(i, j + 1, pos + 1)
             if order > 0:
                 bonds.pop()
@@ -906,6 +909,8 @@ def _collect_mode(
                 used[j] -= order
                 if is_nitro[i]:
                     partner[i] = -1
+                if is_nitro[j]:
+                    partner[j] = -1
 
     backtrack(0, 1, 0)
 
