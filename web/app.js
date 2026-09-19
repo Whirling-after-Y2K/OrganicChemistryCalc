@@ -56,7 +56,6 @@ const viewerApp = createApp({
       savePath: "",
       error: "",
       status: "就绪",
-      pathText: "",
       loadRequests: {},
       groupOptions: [],
       isomerGroups: [],
@@ -118,8 +117,7 @@ const viewerApp = createApp({
     const params = new URLSearchParams(location.search);
     const openPath = params.get("open");
     if (openPath) {
-      this.pathText = openPath;
-      this.loadByPath();
+      this.requestLoad({ path: openPath });
     }
   },
   methods: {
@@ -178,14 +176,6 @@ const viewerApp = createApp({
         this.error = "读取文件失败：" + err.message;
         this.status = "";
       }
-    },
-    async loadByPath() {
-      const path = (this.pathText || "").trim();
-      if (!path) {
-        this.error = "请输入分子文件路径";
-        return;
-      }
-      await this.requestLoad({ path });
     },
     loadDescriptor(payload) {
       if (typeof payload.path === "string") {

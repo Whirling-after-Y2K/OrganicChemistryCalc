@@ -39,7 +39,7 @@ import oc_synthesis
 import organic_chemistry as oc
 
 app = Flask(__name__, static_folder="web", static_url_path="")
-app.json.ensure_ascii = False  # 保留中文，便于调试与阅读
+app.json.ensure_ascii = False  # type: ignore # 保留中文，便于调试与阅读
 
 # 编辑会话：session_id -> {"molecule": Molecule, "source": str}（仅存内存）
 _SESSIONS: dict[str, dict[str, Any]] = {}
@@ -103,7 +103,7 @@ def _cache_loaded_molecule(
 
 
 @app.post("/api/load")
-def load_molecule() -> tuple[Any, int]:
+def load_molecule() -> Any:
     """加载分子：接受 {"path": ...} 或 {"filename": ..., "content": ...}。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -188,7 +188,7 @@ def _get_session(session_id: str) -> dict[str, Any]:
 
 def _atom_at(molecule: oc.Molecule, atom_id: object) -> oc.Atom:
     try:
-        index = int(atom_id)
+        index = int(atom_id) #type: ignore
     except (TypeError, ValueError):
         raise ValueError("原子编号无效") from None
     if not 0 <= index < len(molecule.atoms):
@@ -492,7 +492,7 @@ def _analysis_job_response(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/isomers")
-def analyze_isomers() -> tuple[Any, int]:
+def analyze_isomers() -> Any:
     """枚举当前分子的同分异构体：{session_id, required_groups, ...}。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -511,7 +511,7 @@ def analyze_isomers() -> tuple[Any, int]:
 
 
 @app.post("/api/isomers/jobs")
-def start_isomer_job() -> tuple[Any, int]:
+def start_isomer_job() -> Any:
     """提交后台异构体枚举任务，立即返回任务编号。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -532,7 +532,7 @@ def start_isomer_job() -> tuple[Any, int]:
 
 
 @app.get("/api/analysis-jobs/<job_id>")
-def analysis_job(job_id: str) -> tuple[Any, int]:
+def analysis_job(job_id: str) -> Any:
     """查询后台分析任务状态。"""
     try:
         return jsonify(_analysis_job_response(job_id))
@@ -541,7 +541,7 @@ def analysis_job(job_id: str) -> tuple[Any, int]:
 
 
 @app.post("/api/edit")
-def edit_molecule() -> tuple[Any, int]:
+def edit_molecule() -> Any:
     """编辑分子：{session_id, op, ...}；成功后返回最新载荷。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -607,7 +607,7 @@ def edit_molecule() -> tuple[Any, int]:
         else:
             raise ValueError("未知编辑操作")
         payload = oc_render.molecule_to_payload(molecule, session["source"])
-        return jsonify({"ok": True, "session_id": body["session_id"], "molecule": payload})
+        return jsonify({"ok": True, "session_id": body["session_id"], "molecule": payload}) # type: ignore
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
@@ -615,7 +615,7 @@ def edit_molecule() -> tuple[Any, int]:
 
 
 @app.post("/api/save")
-def save_molecule() -> tuple[Any, int]:
+def save_molecule() -> Any:
     """保存分子为本地构建脚本：{session_id, path}。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -634,7 +634,7 @@ def save_molecule() -> tuple[Any, int]:
 
 
 @app.post("/api/synthesis")
-def plan_route() -> tuple[Any, int]:
+def plan_route() -> Any:
     """规划合成路线：{reactant_ids, target_id, ...}。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -661,7 +661,7 @@ def plan_route() -> tuple[Any, int]:
 
 
 @app.post("/api/synthesis/jobs")
-def start_synthesis_job() -> tuple[Any, int]:
+def start_synthesis_job() -> Any:
     """提交后台合成规划任务，立即返回任务编号。"""
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -682,7 +682,7 @@ def start_synthesis_job() -> tuple[Any, int]:
                 max_routes,
             ),
         )
-        return jsonify({"ok": True, "job_id": job_id, "poll_interval_ms": ANALYSIS_POLL_INTERVAL_MS})
+        return jsonify({"ok": True, "job_id": job_id, "poll_interval_ms": ANALYSIS_POLL_INTERVAL_MS}) 
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:

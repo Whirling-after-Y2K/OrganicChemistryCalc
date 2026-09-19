@@ -10,3 +10,6 @@ test_render.py
 .vscode
 requirements.txt
 test_*
+_oc_*.py
+diag_*.py
+*.md
