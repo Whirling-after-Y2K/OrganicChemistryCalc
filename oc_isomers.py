@@ -10,6 +10,8 @@
 - 普通模式（无基团）用于不可能含苯环的分子式（C < 6 或不饱和度 < 4），
   按图论全集枚举；可含苯环的分子式只枚举"含苯环/硝基"的结构族，
   符合高中化学口径（不含 Dewar 苯等罕见价键异构）。
+- 高中口径默认禁止苯环/片段外部额外成环；allow_extra_rings=True 可恢复
+  允许额外环的完整图论行为（仍受搜索规模守卫限制）。
 - 稠环芳烃（萘式）若被枚举，基团模式下以"单环 π + 其余显式双键"形式
   列出，v1 不保证规范表示。
 - 剪枝：氢数预算（当前隐氢数不能低于目标）、不饱和度预算（基团贡献 +
@@ -365,6 +367,7 @@ def find_isomers(
     molecule: oc.Molecule,
     required_groups: Sequence[str] | None = None,
     equivalent_hydrogens: Sequence[int] | None = None,
+    allow_extra_rings: bool | None = None,
 ) -> list[oc.Molecule]:
     """返回分子的全部同分异构体（含输入结构本身的隐氢形式）。
 
@@ -375,7 +378,10 @@ def find_isomers(
       含非正整数抛 ValueError；
     - 重原子数超过 MAX_HEAVY_ATOMS 抛 ValueError；
     - 无法用隐氢模型表示的分子（如 H2、HF）退化为仅返回输入本身；
-    - 可含苯环的分子式只枚举含苯环/硝基的结构族（高中口径）。
+    - 可含苯环的分子式只枚举含苯环/硝基的结构族（高中口径）；
+    - allow_extra_rings 控制是否允许片段外部额外成环：默认在可含苯环的
+      分子式中禁止（官方题解口径），普通分子式保留环状异构体；True 恢复
+      允许额外环的完整图论行为（仍受搜索规模守卫限制）。
     """
     resolved = _resolve_required_groups(required_groups)
     h_pattern = _resolve_equivalent_hydrogens(equivalent_hydrogens)
@@ -409,6 +415,10 @@ def find_isomers(
     fragments = tuple(
         spec for name, spec in _FRAGMENT_SPECS.items() if name in resolved
     )
+    benzene_capable = heavy.get('c', 0) >= 6 and dbe >= 4
+    extra_rings_allowed = (
+        not benzene_capable if allow_extra_rings is None else allow_extra_rings
+    )
     budget = _NodeBudget(MAX_SEARCH_NODES, MAX_SEARCH_SECONDS)
     frag_dbe = sum(spec.dbe for spec in fragments)
     collected: list[oc.Molecule] = []
@@ -418,7 +428,6 @@ def find_isomers(
         collected.append(oc.copy_molecule(molecule))
     else:
         nitro_min = 1 if _GROUP_NITRO in resolved else 0
-        benzene_capable = heavy.get('c', 0) >= 6 and dbe >= 4
         if benzene_capable:
             for k_b in range(1, heavy.get('c', 0) // 6 + 1):
                 mode_budget = dbe - 4 * k_b - frag_dbe
@@ -428,10 +437,37 @@ def find_isomers(
                     heavy.get('n', 0), heavy.get('o', 0) // 2, mode_budget
                 )
                 for k_n in range(nitro_min, max_nitro + 1):
-                    _collect_mode(
-                        k_b, k_n, fragments, heavy, target, resolved, h_classes,
-                        budget, collected,
-                    )
+                    remaining_budget = mode_budget - k_n
+                    fragment_names = {spec.name for spec in fragments}
+                    if not extra_rings_allowed and remaining_budget > 0:
+                        # 无额外环时，剩余 DBE 只能来自三键或双键。按
+                        # "含三键 / 无三键但含双键" 拆成互斥模式，避免在
+                        # 全部键级上盲目分支。
+                        triple_fragments = (
+                            fragments
+                            if _GROUP_TRIPLE in fragment_names
+                            else fragments + (_FRAGMENT_SPECS[_GROUP_TRIPLE],)
+                        )
+                        _collect_mode(
+                            k_b, k_n, triple_fragments, heavy, target, resolved,
+                            h_classes, budget, collected, extra_rings_allowed,
+                        )
+                        if _GROUP_TRIPLE not in fragment_names:
+                            double_fragments = (
+                                fragments
+                                if _GROUP_DOUBLE in fragment_names
+                                else fragments + (_FRAGMENT_SPECS[_GROUP_DOUBLE],)
+                            )
+                            _collect_mode(
+                                k_b, k_n, double_fragments, heavy, target, resolved,
+                                h_classes, budget, collected, extra_rings_allowed,
+                                forbid_triple=True,
+                            )
+                    else:
+                        _collect_mode(
+                            k_b, k_n, fragments, heavy, target, resolved, h_classes,
+                            budget, collected, extra_rings_allowed,
+                        )
             if not collected and not resolved:
                 # 罕见：分子式满足可含苯环但不存在含苯环结构 → 回退普通模式（仅无约束）
                 max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe - frag_dbe)
@@ -440,7 +476,7 @@ def find_isomers(
                         continue
                     _collect_mode(
                         0, k_n, fragments, heavy, target, resolved, h_classes,
-                        budget, collected,
+                        budget, collected, extra_rings_allowed,
                     )
         else:
             max_nitro = min(heavy.get('n', 0), heavy.get('o', 0) // 2, dbe - frag_dbe)
@@ -449,7 +485,7 @@ def find_isomers(
                     continue
                 _collect_mode(
                     0, k_n, fragments, heavy, target, resolved, h_classes,
-                    budget, collected,
+                    budget, collected, extra_rings_allowed,
                 )
 
     buckets: dict[tuple[str, ...], list[oc.Molecule]] = {}
@@ -487,6 +523,8 @@ def _collect_mode(
     h_classes: tuple[int, ...] | None,
     budget: _NodeBudget,
     collected: list[oc.Molecule],
+    allow_extra_rings: bool,
+    forbid_triple: bool = False,
 ) -> None:
     """枚举含 k_b 个苯环、k_n 个硝基与 fragments 中各 1 个片段的所有候选。
 
@@ -568,11 +606,41 @@ def _collect_mode(
     used: list[int] = list(base)
     bond_count: list[int] = [0] * n
     bonds: list[tuple[int, int, int]] = []
+    bond_dbe: int = 0
     partner: list[int] = [-1] * n
     pairs: list[tuple[int, int]] = [
         (a, b) for a in range(n) for b in range(a + 1, n)
     ]
     halogens: frozenset[str] = frozenset({"f", "cl", "br", "i"})
+
+    # 片段外部连通性：用于在高中口径下尽早禁止额外环。苯环与片段内部
+    # 的固定键先并入同一分量；递归键加入/回退时同步维护分量标记。
+    component_id: list[int] = list(range(n))
+
+    def merge_components(a: int, b: int) -> list[tuple[int, int]]:
+        """合并两个分量，返回可精确回滚的 (原子, 原分量) 记录。"""
+        old_id = component_id[b]
+        new_id = component_id[a]
+        if old_id == new_id:
+            return []
+        changed = [
+            (index, old_id)
+            for index, value in enumerate(component_id)
+            if value == old_id
+        ]
+        for index, _old in changed:
+            component_id[index] = new_id
+        return changed
+
+    for index in range(n):
+        if not is_slot[index]:
+            continue
+        for other in range(index + 1, n):
+            if is_slot[other] and ring_id[index] == ring_id[other]:
+                merge_components(index, other)
+    for start, spec in zip(frag_starts, fragments):
+        for a, b, _order in spec.bonds:
+            merge_components(start + a, start + b)
 
     def current_h() -> int:
         total = 0
@@ -616,7 +684,13 @@ def _collect_mode(
 
     def build_leaf() -> None:
         # 完成态预检：当前键已固定，递归原子未全连通则不可能成合法分子
-        if not graph_state()[1]:
+        if not allow_extra_rings:
+            if not all(
+                component_id[index] == component_id[0]
+                for index in range(n)
+            ):
+                return
+        elif not graph_state()[1]:
             return
         # 氢数预检：不再有成键空间，隐氢数已定，与目标不符则公式必不匹配
         if current_h() != target_h:
@@ -856,6 +930,7 @@ def _collect_mode(
         return True
 
     def backtrack(i: int, j: int, pos: int) -> None:
+        nonlocal bond_dbe
         budget.visit()
         if i == n:
             build_leaf()
@@ -880,7 +955,10 @@ def _collect_mode(
                 return
             backtrack(i + 1, i + 2, pos)
             return
-        if base_dbe + sum(order - 1 for _, _, order in bonds) + graph_state()[0] > target_dbe:
+        if allow_extra_rings:
+            if base_dbe + bond_dbe + graph_state()[0] > target_dbe:
+                return
+        elif base_dbe + bond_dbe > target_dbe:
             return
         if not feasible(pos):
             return
@@ -888,14 +966,23 @@ def _collect_mode(
             # 同一苯环的两个槽位之间禁止成键（保持苯环为干净的单环）
             backtrack(i, j + 1, pos + 1)
             return
-        max_order = min(3, limits[i] - used[i], limits[j] - used[j])
+        max_order = min(
+            2 if forbid_triple else 3,
+            limits[i] - used[i],
+            limits[j] - used[j],
+        )
         for order in range(max_order + 1):
             if order > 0:
+                if not allow_extra_rings and component_id[i] == component_id[j]:
+                    # 该键会闭合片段外部新环；高中口径下直接剪掉。
+                    continue
+                merged = merge_components(i, j)
                 used[i] += order
                 used[j] += order
                 bond_count[i] += 1
                 bond_count[j] += 1
                 bonds.append((i, j, order))
+                bond_dbe += order - 1
                 if is_nitro[i]:
                     partner[i] = j
                 if is_nitro[j]:
@@ -905,8 +992,11 @@ def _collect_mode(
                 bonds.pop()
                 bond_count[i] -= 1
                 bond_count[j] -= 1
+                bond_dbe -= order - 1
                 used[i] -= order
                 used[j] -= order
+                for index, old_id in merged:
+                    component_id[index] = old_id
                 if is_nitro[i]:
                     partner[i] = -1
                 if is_nitro[j]:
