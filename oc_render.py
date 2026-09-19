@@ -588,6 +588,7 @@ def molecule_to_payload(molecule: oc.Molecule, source: str = "") -> dict[str, An
         "source": source,
         "formula": _formula_string(molecule.formula),
         "unsaturation": molecule.unsaturation,
+        "equivalent_hydrogen_groups": molecule.equivalent_hydrogen_groups,
         "ring_count": molecule.ring_count,
         "component_count": molecule.component_count,
         "atom_count": len(molecule.atoms),

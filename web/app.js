@@ -95,6 +95,10 @@ const viewerApp = createApp({
     formulaHtml() {
       return this.molecule ? toSubscript(this.molecule.formula) : "";
     },
+    equivalentHydrogenText() {
+      const groups = this.molecule?.equivalent_hydrogen_groups;
+      return groups?.length ? groups.join(" : ") : "无";
+    },
     molecule() {
       return this.activeTab ? this.activeTab.molecule : null;
     },
@@ -119,15 +123,28 @@ const viewerApp = createApp({
     }
   },
   methods: {
+    async readJson(response) {
+      const contentType = response.headers.get("Content-Type") || "";
+      if (!contentType.toLowerCase().includes("application/json")) {
+        throw new Error(`请求失败（HTTP ${response.status}）`);
+      }
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || `请求失败（HTTP ${response.status}）`);
+      }
+      return data;
+    },
+    async getJson(url) {
+      const response = await fetch(url);
+      return this.readJson(response);
+    },
     async postJson(url, payload) {
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await response.json();
-      if (!data.ok) throw new Error(data.error || "请求失败");
-      return data;
+      return this.readJson(response);
     },
     async loadGroupOptions() {
       try {
@@ -306,7 +323,7 @@ const viewerApp = createApp({
     },
     async pollAnalysisJob(jobId, intervalMs, updateProgress) {
       for (;;) {
-        const data = await this.postJson(`/api/analysis-jobs/${jobId}`);
+        const data = await this.getJson(`/api/analysis-jobs/${jobId}`);
         if (data.status === "done") return data.result;
         if (data.status === "failed") throw new Error(data.error || "分析失败");
         if (updateProgress) updateProgress(data);

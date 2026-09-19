@@ -304,14 +304,14 @@ def _contains_groups(molecule: oc.Molecule, resolved: frozenset[str]) -> bool:
 
 
 def _reduce_hydrogen_pattern(seq: Sequence[int]) -> tuple[int, ...]:
-    """按最大公约数约分等位氢模式；空序列保持空（表示无氢）。"""
+    """按最大公约数约分并降序规范等位氢模式；空序列表示无氢。"""
     values = tuple(int(value) for value in seq)
     if not values:
         return ()
     divisor = 0
     for value in values:
         divisor = math.gcd(divisor, value)
-    return tuple(value // divisor for value in values)
+    return tuple(sorted((value // divisor for value in values), reverse=True))
 
 
 def _resolve_equivalent_hydrogens(

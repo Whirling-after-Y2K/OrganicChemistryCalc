@@ -74,6 +74,7 @@
           <dt>名称</dt><dd>{{ molecule.name || '未命名' }}</dd>
           <dt>分子式</dt><dd v-html="formulaHtml"></dd>
           <dt>不饱和度</dt><dd>{{ molecule.unsaturation }}</dd>
+          <dt>等位氢</dt><dd>{{ equivalentHydrogenText }}</dd>
           <dt>环数</dt><dd>{{ molecule.ring_count }}</dd>
           <dt>原子 / 键 / π 体系</dt>
             <dd>{{ molecule.atom_count }} / {{ molecule.bond_count }} / {{ molecule.pi_count }}</dd>
