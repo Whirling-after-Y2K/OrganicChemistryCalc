@@ -25,6 +25,7 @@ import time
 import uuid
 import webbrowser
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -626,6 +627,10 @@ def save_molecule() -> Any:
         path = str(body.get("path") or "").strip()
         if not path:
             raise ValueError("保存路径不能为空")
+        molecule_name = Path(path).stem
+        if not molecule_name:
+            raise ValueError("保存文件名不能为空")
+        session["molecule"].name = molecule_name
         oc_io.save_molecule(session["molecule"], path)
         return jsonify({"ok": True, "path": os.path.abspath(path)})
     except ValueError as exc:

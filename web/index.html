@@ -16,6 +16,7 @@
     <input ref="fileInput" type="file" accept=".py,.txt,text/plain" style="display:none"
            @change="onFileChosen">
     <button @click="openNewMolecule">新建分子</button>
+    <button class="primary" @click="openSaveDialog" :disabled="!molecule">重命名&保存</button>
     <span class="divider"></span>
     <button :class="{ active: editMode === 'select' }" @click="setEditMode('select')">选择</button>
     <button :class="{ active: editMode === 'addAtom' }" @click="setEditMode('addAtom')">加原子</button>
@@ -33,7 +34,6 @@
     <button @click="zoomBy(-1)">缩小</button>
     <button @click="zoomBy(1)">放大</button>
     <button @click="fitView">适应窗口</button>
-    <button class="primary" @click="openSaveDialog" :disabled="!molecule">保存</button>
   </header>
 
   <main class="layout">

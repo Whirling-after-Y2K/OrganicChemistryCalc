@@ -179,7 +179,11 @@ const viewerApp = createApp({
     },
     async openNewMolecule() {
       this.error = "";
-      await this.requestLoad({ path: "new.py" });
+      const key = "new:" + performance.now() + ":" + Math.random().toString(36).slice(2);
+      await this.performLoad({ path: "new.py" }, {
+        key,
+        displaySource: "new.py",
+      });
     },
     loadDescriptor(payload) {
       if (typeof payload.path === "string") {
@@ -653,8 +657,37 @@ const viewerApp = createApp({
         tab.dirty = false;
         this.status = "已保存到：" + data.path;
         this.showSaveDialog = false;
+        await this.reloadSavedTab(tab, data.path);
       } catch (err) {
         this.error = "请求失败：" + err.message;
+        this.status = "";
+      }
+    },
+    async reloadSavedTab(tab, path) {
+      this.status = "正在重新加载…";
+      try {
+        const response = await fetch("/api/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          throw new Error(data.error || "重新加载失败");
+        }
+        const descriptor = this.loadDescriptor({ path });
+        tab.key = descriptor.key;
+        tab.source = descriptor.displaySource || data.molecule.source || "";
+        tab.name = data.molecule.name || "";
+        tab.formula = data.molecule.formula || "";
+        tab.molecule = data.molecule;
+        tab.sessionId = data.session_id;
+        tab.originalPath = path;
+        tab.dirty = false;
+        this.status = "已保存并重新加载：" + path;
+        this.$nextTick(() => this.fitView());
+      } catch (err) {
+        this.error = "重新加载失败：" + err.message;
         this.status = "";
       }
     },
