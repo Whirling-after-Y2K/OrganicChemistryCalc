@@ -24,7 +24,7 @@ const CANVAS_THEME = {
     },
     activeH: "#ffb84d",
     bond: "#e0e4e8",
-    mask: "#1f2327",
+    mask: "#17191C",
     empty: "#8d99a6",
     pending: "#ff5252",
   },
