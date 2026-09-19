@@ -15,6 +15,7 @@
     <button class="primary" @click="pickFile">打开分子…</button>
     <input ref="fileInput" type="file" accept=".py,.txt,text/plain" style="display:none"
            @change="onFileChosen">
+    <button @click="openNewMolecule">新建分子</button>
     <span class="divider"></span>
     <button :class="{ active: editMode === 'select' }" @click="setEditMode('select')">选择</button>
     <button :class="{ active: editMode === 'addAtom' }" @click="setEditMode('addAtom')">加原子</button>

@@ -177,6 +177,10 @@ const viewerApp = createApp({
         this.status = "";
       }
     },
+    async openNewMolecule() {
+      this.error = "";
+      await this.requestLoad({ path: "new.py" });
+    },
     loadDescriptor(payload) {
       if (typeof payload.path === "string") {
         const normPath = payload.path.replace(/\\/g, "/");
