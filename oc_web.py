@@ -259,14 +259,15 @@ def _isomer_analysis_result(
     allow_extra_rings: bool | None,
     limit: int,
 ) -> dict[str, Any]:
-    """执行异构体枚举并序列化为前端载荷。"""
+    """执行异构体枚举并序列化为前端载荷（隐藏输入分子本身）。"""
     isomers = oc_isomers.find_isomers(
         molecule,
         required_groups=required_groups,
         equivalent_hydrogens=equivalent_hydrogens,
         allow_extra_rings=allow_extra_rings,
     )
-    returned = isomers[:limit]
+    visible_isomers = [candidate for candidate in isomers if candidate != molecule]
+    returned = visible_isomers[:limit]
     formula = _formula_text(molecule.formula)
     items: list[dict[str, Any]] = []
     for index, candidate in enumerate(returned, 1):
@@ -283,9 +284,9 @@ def _isomer_analysis_result(
         items.append(item)
     return {
         "ok": True,
-        "total": len(isomers),
+        "total": len(visible_isomers),
         "returned": len(items),
-        "truncated": len(isomers) > len(items),
+        "truncated": len(visible_isomers) > len(items),
         "isomers": items,
     }
 
