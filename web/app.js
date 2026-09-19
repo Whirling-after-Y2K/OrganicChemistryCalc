@@ -46,6 +46,7 @@ const viewerApp = createApp({
       tabs: [],
       activeTabId: null,
       nextTabId: 1,
+      analysisTab: "info",
       editMode: "select",
       elementOptions: ELEMENT_OPTIONS,
       elementChoice: "c",
@@ -56,6 +57,24 @@ const viewerApp = createApp({
       error: "",
       status: "就绪",
       pathText: "",
+      loadRequests: {},
+      groupOptions: [],
+      isomerGroups: [],
+      isomerHydrogenPattern: "",
+      isomerAllowExtraRings: false,
+      isomerLimit: 200,
+      isomerResults: [],
+      isomerTotal: 0,
+      isomerTruncated: false,
+      isomerLoading: false,
+      synthesisReactantIds: [],
+      synthesisTargetId: null,
+      synthesisReaction: "",
+      synthesisConditions: "",
+      synthesisMaxSteps: 4,
+      synthesisMaxRoutes: 5,
+      synthesisRoutes: [],
+      synthesisLoading: false,
       zoom: 1,
       panX: 0,
       panY: 0,
@@ -70,16 +89,20 @@ const viewerApp = createApp({
     };
   },
   computed: {
+    activeTab() {
+      return this.tabs.find((t) => t.id === this.activeTabId) || null;
+    },
     formulaHtml() {
       return this.molecule ? toSubscript(this.molecule.formula) : "";
     },
     molecule() {
-      const tab = this.tabs.find((t) => t.id === this.activeTabId);
-      return tab ? tab.molecule : null;
+      return this.activeTab ? this.activeTab.molecule : null;
     },
     activeSource() {
-      const tab = this.tabs.find((t) => t.id === this.activeTabId);
-      return tab ? tab.source : "";
+      return this.activeTab ? this.activeTab.source : "";
+    },
+    synthesisReady() {
+      return Boolean(this.synthesisReactantIds.length && this.synthesisTargetId);
     },
   },
   mounted() {
@@ -87,6 +110,7 @@ const viewerApp = createApp({
     this.initCanvasEvents();
     this.updateCursor();
     window.addEventListener("resize", () => this.resizeCanvas());
+    this.loadGroupOptions();
     const params = new URLSearchParams(location.search);
     const openPath = params.get("open");
     if (openPath) {
@@ -95,6 +119,25 @@ const viewerApp = createApp({
     }
   },
   methods: {
+    async postJson(url, payload) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!data.ok) throw new Error(data.error || "请求失败");
+      return data;
+    },
+    async loadGroupOptions() {
+      try {
+        const response = await fetch("/api/groups");
+        const data = await response.json();
+        this.groupOptions = data.ok ? data.groups : [];
+      } catch (err) {
+        this.groupOptions = [];
+      }
+    },
     // ---- 文件加载 ----
     pickFile() {
       this.$refs.fileInput.click();
@@ -127,9 +170,54 @@ const viewerApp = createApp({
       }
       await this.requestLoad({ path });
     },
+    loadDescriptor(payload) {
+      if (typeof payload.path === "string") {
+        const normPath = payload.path.replace(/\\/g, "/");
+        const parts = normPath.split("/");
+        const source = parts[parts.length - 1] || payload.path;
+        return {
+          key: normPath.toLowerCase(),
+          displaySource:
+            parts.length >= 2
+              ? parts[parts.length - 2] + "\\" + parts[parts.length - 1]
+              : source,
+        };
+      }
+      const source =
+        typeof payload.filename === "string" ? payload.filename : "分子";
+      const content = typeof payload.content === "string" ? payload.content : "";
+      return {
+        key: source.toLowerCase() + ":" + hashString(content),
+        displaySource: source,
+      };
+    },
     async requestLoad(payload) {
       this.error = "";
+      const descriptor = this.loadDescriptor(payload);
+      const existing = this.tabs.find((t) => t.key === descriptor.key);
+      if (existing) {
+        this.activeTabId = existing.id;
+        this.status = "已激活：" + existing.source;
+        this.$nextTick(() => this.fitView());
+        return;
+      }
+
+      const pending = this.loadRequests[descriptor.key];
+      if (pending) return pending;
+
+      const request = this.performLoad(payload, descriptor);
+      this.loadRequests[descriptor.key] = request;
+      try {
+        return await request;
+      } finally {
+        if (this.loadRequests[descriptor.key] === request) {
+          delete this.loadRequests[descriptor.key];
+        }
+      }
+    },
+    async performLoad(payload, descriptor) {
       this.status = "正在加载…";
+      const startedAt = performance.now();
       try {
         const response = await fetch("/api/load", {
           method: "POST",
@@ -144,49 +232,168 @@ const viewerApp = createApp({
         }
         const loaded = data.molecule;
         const source = loaded.source || "";
-        // 去重键：路径加载用完整路径（忽略大小写），文件上传用 文件名+内容哈希，
-        // 避免不同目录下同名文件被误判为同一分子
-        let key = source;
-        let displaySource = source;
-        if (typeof payload.path === "string") {
-          const normPath = payload.path.replace(/\\/g, "/");
-          key = normPath.toLowerCase();
-          const parts = normPath.split("/");
-          displaySource =
-            parts.length >= 2
-              ? parts[parts.length - 2] + "\\" + parts[parts.length - 1]
-              : source;
-        } else if (
-          typeof payload.filename === "string" &&
-          typeof payload.content === "string"
-        ) {
-          key = payload.filename.toLowerCase() + ":" + hashString(payload.content);
+        const tab = {
+          id: this.nextTabId++,
+          key: descriptor.key,
+          source: descriptor.displaySource || source,
+          name: loaded.name || "",
+          formula: loaded.formula || "",
+          molecule: loaded,
+          sessionId: data.session_id || "",
+          originalPath: typeof payload.path === "string" ? payload.path : "",
+          dirty: false,
+        };
+        this.tabs.push(tab);
+        this.activeTabId = tab.id;
+        if (!this.synthesisTargetId) this.synthesisTargetId = tab.sessionId;
+        if (!this.synthesisReactantIds.length) {
+          this.synthesisReactantIds = [tab.sessionId];
         }
-        const existing = this.tabs.find((t) => t.key === key);
-        if (existing) {
-          this.activeTabId = existing.id;
-          this.status = "已激活：" + source;
-          this.$nextTick(() => this.fitView());
-        } else {
-          const tab = {
-            id: this.nextTabId++,
-            key: key,
-            source: displaySource,
-            name: loaded.name || "",
-            formula: loaded.formula || "",
-            molecule: loaded,
-            sessionId: data.session_id || "",
-            originalPath: typeof payload.path === "string" ? payload.path : "",
-            dirty: false,
-          };
-          this.tabs.push(tab);
-          this.activeTabId = tab.id;
-          this.status = "已加载：" + source;
-          this.$nextTick(() => this.fitView());
-        }
+        const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
+        this.status = `已加载：${source}（${elapsedMs} ms）`;
+        console.info("分子加载耗时", {
+          source,
+          frontend_ms: elapsedMs,
+          ...(data.timing || {}),
+        });
+        this.$nextTick(() => this.fitView());
       } catch (err) {
         this.error = "请求失败：" + err.message;
         this.status = "";
+      }
+    },
+
+    // ---- 分析结果与流程 ----
+    openAnalysisMolecule(item) {
+      const key = "analysis:" + item.session_id;
+      const existing = this.tabs.find((t) => t.key === key);
+      if (existing) {
+        this.activeTabId = existing.id;
+        this.$nextTick(() => this.fitView());
+        return;
+      }
+      const molecule = item.molecule;
+      const source = molecule.source || item.formula || "分析结果";
+      const tab = {
+        id: this.nextTabId++,
+        key: key,
+        source: source,
+        name: molecule.name || "",
+        formula: molecule.formula || item.formula || "",
+        molecule: molecule,
+        sessionId: item.session_id,
+        originalPath: "",
+        dirty: false,
+      };
+      this.tabs.push(tab);
+      this.activeTabId = tab.id;
+      this.$nextTick(() => this.fitView());
+    },
+    parseHydrogenPattern() {
+      const text = this.isomerHydrogenPattern.trim();
+      if (!text) return [];
+      const values = text
+        .split(/[，,、\s]+/)
+        .filter(Boolean)
+        .map((token) => Number(token));
+      if (values.some((value) => !Number.isInteger(value) || value <= 0)) {
+        throw new Error("等位氢模式需为正整数，如 1,1,2,3");
+      }
+      return values;
+    },
+    wait(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    },
+    async pollAnalysisJob(jobId, intervalMs, updateProgress) {
+      for (;;) {
+        const data = await this.postJson(`/api/analysis-jobs/${jobId}`);
+        if (data.status === "done") return data.result;
+        if (data.status === "failed") throw new Error(data.error || "分析失败");
+        if (updateProgress) updateProgress(data);
+        await this.wait(intervalMs || 250);
+      }
+    },
+    async analyzeIsomers() {
+      const tab = this.activeTab;
+      if (!tab || !tab.sessionId) return;
+      this.error = "";
+      this.status = "正在枚举同分异构体…";
+      this.isomerLoading = true;
+      try {
+        const equivalent_hydrogens = this.parseHydrogenPattern();
+        const submitted = await this.postJson("/api/isomers/jobs", {
+          session_id: tab.sessionId,
+          required_groups: this.isomerGroups,
+          equivalent_hydrogens,
+          allow_extra_rings: this.isomerAllowExtraRings ? true : null,
+          limit: this.isomerLimit,
+        });
+        const data = await this.pollAnalysisJob(
+          submitted.job_id,
+          submitted.poll_interval_ms,
+          (job) => {
+            const seconds = (job.elapsed_ms / 1000).toFixed(1);
+            this.status = `正在枚举同分异构体…（${seconds}s）`;
+          },
+        );
+        this.isomerResults = data.isomers;
+        this.isomerTotal = data.total;
+        this.isomerTruncated = data.truncated;
+        this.status =
+          "同分异构体：" +
+          data.total +
+          (data.truncated ? `（显示前 ${data.returned} 个）` : "");
+      } catch (err) {
+        this.error = err.message;
+        this.status = "";
+        this.isomerResults = [];
+        this.isomerTotal = 0;
+        this.isomerTruncated = false;
+      } finally {
+        this.isomerLoading = false;
+      }
+    },
+    toggleSynthesisReactant(sessionId, event) {
+      const selected = new Set(this.synthesisReactantIds);
+      if (event.target.checked) selected.add(sessionId);
+      else selected.delete(sessionId);
+      this.synthesisReactantIds = [...selected];
+    },
+    async planSynthesis() {
+      if (!this.synthesisReady) {
+        this.error = "请选择起始反应物和目标产物";
+        return;
+      }
+      this.error = "";
+      this.status = "正在规划合成路线…";
+      this.synthesisLoading = true;
+      try {
+        const submitted = await this.postJson("/api/synthesis/jobs", {
+          reactant_ids: this.synthesisReactantIds,
+          target_id: this.synthesisTargetId,
+          reaction: this.synthesisReaction,
+          conditions: this.synthesisConditions,
+          max_steps: this.synthesisMaxSteps,
+          max_routes: this.synthesisMaxRoutes,
+        });
+        const data = await this.pollAnalysisJob(
+          submitted.job_id,
+          submitted.poll_interval_ms,
+          (job) => {
+            const seconds = (job.elapsed_ms / 1000).toFixed(1);
+            this.status = `正在规划合成路线…（${seconds}s）`;
+          },
+        );
+        this.synthesisRoutes = data.routes;
+        this.status = data.route_count
+          ? `找到 ${data.route_count} 条合成路线`
+          : "未找到合成路线";
+      } catch (err) {
+        this.error = err.message;
+        this.status = "";
+        this.synthesisRoutes = [];
+      } finally {
+        this.synthesisLoading = false;
       }
     },
 
@@ -200,11 +407,24 @@ const viewerApp = createApp({
       const index = this.tabs.findIndex((t) => t.id === id);
       if (index < 0) return;
       const wasActive = id === this.activeTabId;
+      const closedSessionId = this.tabs[index].sessionId;
       this.tabs.splice(index, 1);
       if (wasActive) {
         const next = this.tabs[Math.min(index, this.tabs.length - 1)];
         this.activeTabId = next ? next.id : null;
+        if (closedSessionId === this.synthesisTargetId) {
+          this.synthesisTargetId = next ? next.sessionId : null;
+        }
       }
+      if (
+        closedSessionId === this.synthesisTargetId &&
+        !this.tabs.some((tab) => tab.sessionId === this.synthesisTargetId)
+      ) {
+        this.synthesisTargetId = this.tabs.length ? this.tabs[0].sessionId : null;
+      }
+      this.synthesisReactantIds = this.synthesisReactantIds.filter(
+        (sessionId) => this.tabs.some((tab) => tab.sessionId === sessionId)
+      );
       this.render();
       this.$nextTick(() => this.fitView());
     },
