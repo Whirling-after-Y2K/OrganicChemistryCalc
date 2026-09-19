@@ -59,6 +59,11 @@ const ELEMENT_OPTIONS = [
   { value: "h", label: "H" },
 ];
 
+const TEMPLATE_OPTIONS = {
+  benzene: { displaySource: "苯" },
+  nitro: { displaySource: "硝基甲烷" },
+};
+
 const viewerApp = createApp({
   data() {
     return {
@@ -219,6 +224,21 @@ const viewerApp = createApp({
         displaySource: "new.py",
       });
     },
+    async openTemplate(templateName) {
+      const option = TEMPLATE_OPTIONS[templateName];
+      if (!option) {
+        this.error = "未知分子模板";
+        return;
+      }
+      this.error = "";
+      const key =
+        "template:" + templateName + ":" +
+        performance.now() + ":" + Math.random().toString(36).slice(2);
+      await this.performLoad({}, {
+        key,
+        displaySource: option.displaySource,
+      }, "/api/templates/" + templateName);
+    },
     loadDescriptor(payload) {
       if (typeof payload.path === "string") {
         const normPath = payload.path.replace(/\\/g, "/");
@@ -264,11 +284,11 @@ const viewerApp = createApp({
         }
       }
     },
-    async performLoad(payload, descriptor) {
+    async performLoad(payload, descriptor, url = "/api/load") {
       this.status = "正在加载…";
       const startedAt = performance.now();
       try {
-        const response = await fetch("/api/load", {
+        const response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -450,6 +470,7 @@ const viewerApp = createApp({
     switchTab(id) {
       if (id === this.activeTabId) return;
       this.activeTabId = id;
+      this.pendingAtom = null;
       this.$nextTick(() => this.fitView());
     },
     closeTab(id) {
@@ -532,6 +553,21 @@ const viewerApp = createApp({
       // 判定区域与原子本身同大（直径 ≈ 字号）
       return Math.max(12, fontSize * 0.5);
     },
+    async addStructure(op) {
+      if (!this.molecule || !this.molecule.atoms.length) {
+        this.error = "请先打开或新建分子";
+        this.status = "";
+        return;
+      }
+      if (this.pendingAtom === null) {
+        this.error = "请先点击一个原子作为锚点";
+        this.status = "";
+        return;
+      }
+      const label = op === "add_benzene" ? "苯环" : "硝基";
+      const ok = await this.editApi({ op, atom: this.pendingAtom });
+      if (ok) this.status = "已加入：" + label;
+    },
     hitAtom(x, y) {
       let best = null;
       let bestDistance = Infinity;
@@ -569,7 +605,15 @@ const viewerApp = createApp({
     },
     handleCanvasClick(event) {
       if (!this.molecule || !this.molecule.atoms.length) return;
-      if (this.editMode === "select") return;
+      if (this.editMode === "select") {
+        const canvas = this.$refs.canvas;
+        const rect = canvas.getBoundingClientRect();
+        const atomId = this.hitAtom(event.clientX - rect.left, event.clientY - rect.top);
+        this.pendingAtom = atomId;
+        this.status = atomId === null ? "未选中原子" : "已选中锚点原子";
+        this.render();
+        return;
+      }
       const canvas = this.$refs.canvas;
       const rect = canvas.getBoundingClientRect();
       const x = event.clientX - rect.left;

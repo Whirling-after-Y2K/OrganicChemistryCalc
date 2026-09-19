@@ -71,6 +71,8 @@
           <option :value="2">双键</option>
           <option :value="3">三键</option>
         </select>
+        <button @click="addStructure('add_benzene')">苯环</button>
+        <button @click="addStructure('add_nitro')">硝基</button>
         <span class="spacer"></span>
         <button title="切换浅色/深色" @click="toggleTheme">
           {{ theme === "dark" ? "浅色" : "深色" }}

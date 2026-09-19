@@ -10,6 +10,8 @@
     GET  /api/health       健康检查
     POST /api/load         加载分子；JSON 请求体为 {"path": ...} 或
                            {"filename": ..., "content": ...}
+    POST /api/templates/<template>
+                           新建内置模板分子：benzene / nitro
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -187,6 +189,65 @@ def _get_session(session_id: str) -> dict[str, Any]:
     return session
 
 
+def _create_benzene() -> oc.Molecule:
+    """创建苯模板；苯环使用单键骨架加离域 π 体系表示。"""
+    molecule = oc.Molecule(name="苯")
+    ring = [oc.Atom("c", molecule) for _ in range(6)]
+    for index, atom in enumerate(ring):
+        oc.add_bond(atom, ring[(index + 1) % 6])
+    oc.add_pi_system(ring)
+    molecule.validate()
+    return molecule
+
+
+def _create_nitro_methane() -> oc.Molecule:
+    """创建硝基模板；硝基以 [N,O,O] π 体系连接到甲基。"""
+    molecule = oc.Molecule(name="硝基甲烷")
+    carbon = oc.Atom("c", molecule)
+    nitrogen = oc.Atom("n", molecule)
+    oxygen1 = oc.Atom("o", molecule)
+    oxygen2 = oc.Atom("o", molecule)
+    oc.add_bond(carbon, nitrogen)
+    oc.add_bond(nitrogen, oxygen1)
+    oc.add_bond(nitrogen, oxygen2)
+    oc.add_pi_system([nitrogen, oxygen1, oxygen2])
+    molecule.validate()
+    return molecule
+
+
+_TEMPLATE_CREATORS: dict[str, tuple[str, Callable[[], oc.Molecule]]] = {
+    "benzene": ("苯", _create_benzene),
+    "nitro": ("硝基甲烷", _create_nitro_methane),
+}
+
+
+@app.post("/api/templates/<template>")
+def create_template_molecule(template: str) -> Any:
+    """新建内置模板分子并返回编辑会话。"""
+    item = _TEMPLATE_CREATORS.get(template)
+    if item is None:
+        return jsonify({"ok": False, "error": "未知分子模板"}), 400
+    try:
+        source, create_molecule = item
+        molecule = create_molecule()
+        session_id = uuid.uuid4().hex
+        _SESSIONS[session_id] = {
+            "molecule": molecule,
+            "source": source,
+        }
+        return jsonify(
+            {
+                "ok": True,
+                "session_id": session_id,
+                "molecule": oc_render.molecule_to_payload(molecule, source),
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"新建模板失败：{exc}"}), 400
+
+
 def _atom_at(molecule: oc.Molecule, atom_id: object) -> oc.Atom:
     try:
         index = int(atom_id) #type: ignore
@@ -195,6 +256,30 @@ def _atom_at(molecule: oc.Molecule, atom_id: object) -> oc.Atom:
     if not 0 <= index < len(molecule.atoms):
         raise ValueError("原子编号越界")
     return molecule.atoms[index]
+
+
+def _add_benzene_to_atom(molecule: oc.Molecule, anchor: oc.Atom) -> None:
+    """在锚点原子上接入一个苯环取代基。"""
+    ring = [oc.Atom("c", molecule) for _ in range(6)]
+    for index, atom in enumerate(ring):
+        oc.add_bond(atom, ring[(index + 1) % 6])
+    oc.add_pi_system(ring)
+    oc.add_bond(anchor, ring[0])
+    molecule.validate()
+
+
+def _add_nitro_to_atom(molecule: oc.Molecule, anchor: oc.Atom) -> None:
+    """在碳锚点上接入一个硝基取代基。"""
+    if anchor.name != "c":
+        raise ValueError("硝基只能连接到碳原子")
+    nitrogen = oc.Atom("n", molecule)
+    oxygen1 = oc.Atom("o", molecule)
+    oxygen2 = oc.Atom("o", molecule)
+    oc.add_bond(anchor, nitrogen)
+    oc.add_bond(nitrogen, oxygen1)
+    oc.add_bond(nitrogen, oxygen2)
+    oc.add_pi_system([nitrogen, oxygen1, oxygen2])
+    molecule.validate()
 
 
 def _in_any_pi(atom: oc.Atom) -> bool:
@@ -569,6 +654,16 @@ def edit_molecule() -> Any:
             except ValueError:
                 molecule.atoms.remove(new_atom)  # 回滚刚创建但未成键的原子
                 raise
+        elif op in {"add_benzene", "add_nitro"}:
+            _atom_at(molecule, body.get("atom"))
+            # 在副本上构建，全部校验通过后再替换会话分子。
+            edited_molecule = oc.copy_molecule(molecule)
+            edited_anchor = _atom_at(edited_molecule, body.get("atom"))
+            if op == "add_benzene":
+                _add_benzene_to_atom(edited_molecule, edited_anchor)
+            else:
+                _add_nitro_to_atom(edited_molecule, edited_anchor)
+            session["molecule"] = edited_molecule
         elif op == "add_bond":
             atom1 = _atom_at(molecule, body.get("atom1"))
             atom2 = _atom_at(molecule, body.get("atom2"))
@@ -608,7 +703,9 @@ def edit_molecule() -> Any:
             oc.break_bond(atom1, atom2)
         else:
             raise ValueError("未知编辑操作")
-        payload = oc_render.molecule_to_payload(molecule, session["source"])
+        payload = oc_render.molecule_to_payload(
+            session["molecule"], session["source"]
+        )
         return jsonify({"ok": True, "session_id": body["session_id"], "molecule": payload}) # type: ignore
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
