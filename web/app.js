@@ -3,13 +3,32 @@
 
 const { createApp } = Vue;
 
-const ELEMENT_COLORS = {
-  c: "#333333", n: "#1f5fb0", o: "#d22",
-  h: "#777777", f: "#2a9d2a", cl: "#0f7a0f",
-  br: "#8b3a3a", i: "#6b2f9e",
+const CANVAS_THEME = {
+  light: {
+    elementColors: {
+      c: "#333333", n: "#1f5fb0", o: "#d22",
+      h: "#777777", f: "#2a9d2a", cl: "#0f7a0f",
+      br: "#8b3a3a", i: "#6b2f9e",
+    },
+    activeH: "#ff8c00",
+    bond: "#222222",
+    mask: "#ffffff",
+    empty: "#999999",
+    pending: "#e74c3c",
+  },
+  dark: {
+    elementColors: {
+      c: "#e7eaee", n: "#8ab4f8", o: "#ff7b72",
+      h: "#aab4bd", f: "#7fd18c", cl: "#85e0a3",
+      br: "#ffb59a", i: "#d0a6ff",
+    },
+    activeH: "#ffb84d",
+    bond: "#e0e4e8",
+    mask: "#1f2327",
+    empty: "#8d99a6",
+    pending: "#ff5252",
+  },
 };
-const ACTIVE_H_COLOR = "#ff8c00";
-const BOND_COLOR = "#222222";
 // 布局键长（与 oc_render.BOND_LEN 保持一致）
 const BOND_LEN = 40;
 // 原子字号 = 键长 / 1.5，保证任意缩放下 键长 : 原子大小 ≈ 1.5 : 1
@@ -85,6 +104,7 @@ const viewerApp = createApp({
       dragStartX: 0,
       dragStartY: 0,
       dragMoved: false,
+      theme: "light",
     };
   },
   computed: {
@@ -109,6 +129,7 @@ const viewerApp = createApp({
     },
   },
   mounted() {
+    this.initializeTheme();
     this.resizeCanvas();
     this.initCanvasEvents();
     this.updateCursor();
@@ -121,6 +142,19 @@ const viewerApp = createApp({
     }
   },
   methods: {
+    initializeTheme() {
+      this.theme = "dark";
+      document.documentElement.dataset.theme = this.theme;
+      this.render();
+    },
+    toggleTheme() {
+      this.theme = this.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = this.theme;
+      this.render();
+    },
+    canvasTheme() {
+      return CANVAS_THEME[this.theme] || CANVAS_THEME.light;
+    },
     async readJson(response) {
       const contentType = response.headers.get("Content-Type") || "";
       if (!contentType.toLowerCase().includes("application/json")) {
@@ -811,7 +845,7 @@ const viewerApp = createApp({
       if (this.pendingAtom !== null && this.molecule.atoms[this.pendingAtom]) {
         const anchor = this.molecule.atoms[this.pendingAtom];
         const [px, py] = transform(anchor.x, anchor.y);
-        ctx.strokeStyle = "#e74c3c";
+        ctx.strokeStyle = this.canvasTheme().pending;
         ctx.lineWidth = Math.max(1.5, 2 * this.zoom);
         ctx.beginPath();
         ctx.arc(px, py, this.atomHitRadius(anchor), 0, Math.PI * 2);
@@ -819,7 +853,7 @@ const viewerApp = createApp({
       }
     },
     drawEmpty(ctx) {
-      ctx.fillStyle = "#999";
+      ctx.fillStyle = this.canvasTheme().empty;
       ctx.font = "14px 'Microsoft YaHei', Arial, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -835,7 +869,7 @@ const viewerApp = createApp({
       const px = -uy, py = ux;
       const gap = 3.5 * z;
       const offsets = order === 1 ? [0] : order === 2 ? [-1, 1] : [-1, 0, 1];
-      ctx.strokeStyle = BOND_COLOR;
+      ctx.strokeStyle = this.canvasTheme().bond;
       ctx.lineWidth = Math.max(0.5, 2 * z);
       ctx.lineCap = "round";
       for (const off of offsets) {
@@ -846,8 +880,11 @@ const viewerApp = createApp({
       }
     },
     drawAtom(ctx, atom, transform) {
+      const theme = this.canvasTheme();
       const [x, y] = transform(atom.x, atom.y);
-      const color = atom.active ? ACTIVE_H_COLOR : ELEMENT_COLORS[atom.element] || "#333";
+      const color = atom.active
+        ? theme.activeH
+        : theme.elementColors[atom.element] || theme.elementColors.c;
       const label = atom.label || atom.element.toUpperCase();
       const fontSize = Math.max(4, ATOM_FONT_RATIO * this.zoom);
       ctx.font = "600 " + fontSize + "px 'Segoe UI', Arial, sans-serif";
@@ -856,13 +893,13 @@ const viewerApp = createApp({
       // 不透明背景椭圆：完全遮住穿过后方的键线（含字母间空隙与边缘）
       const textWidth = ctx.measureText(label).width;
       const pad = fontSize * 0.08;
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = theme.mask;
       ctx.beginPath();
-      ctx.ellipse(x, y, textWidth / 2 + pad, fontSize / 2 + pad, 0, 0, Math.PI * 2);
+      ctx.ellipse(x, y, textWidth / 2.5 + pad, fontSize / 2.5 + pad, 0, 0, Math.PI * 2);
       ctx.fill();
-      // 白色描边兜底：防止字形抗锯齿边缘透出键线
+      // 蒙版描边兜底：防止字形抗锯齿边缘透出键线
       ctx.lineWidth = Math.max(0.3, fontSize * 0.03);
-      ctx.strokeStyle = "#ffffff";
+      ctx.strokeStyle = theme.mask;
       ctx.strokeText(label, x, y);
       ctx.fillStyle = color;
       ctx.fillText(label, x, y);

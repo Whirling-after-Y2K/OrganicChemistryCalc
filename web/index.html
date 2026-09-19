@@ -1,235 +1,412 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>有机分子查看器</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="style.css">
-  <script src="vendor/vue.global.prod.js"></script>
-</head>
-<body>
-<div id="app" v-cloak>
-  <header class="toolbar">
-    <div class="brand">有机分子查看器</div>
-    <button class="primary" @click="pickFile">打开分子…</button>
-    <input ref="fileInput" type="file" accept=".py,.txt,text/plain" style="display:none"
-           @change="onFileChosen">
-    <button @click="openNewMolecule">新建分子</button>
-    <button class="primary" @click="openSaveDialog" :disabled="!molecule">重命名&保存</button>
-    <span class="divider"></span>
-    <button :class="{ active: editMode === 'select' }" @click="setEditMode('select')">选择</button>
-    <button :class="{ active: editMode === 'addAtom' }" @click="setEditMode('addAtom')">加原子</button>
-    <button :class="{ active: editMode === 'addBond' }" @click="setEditMode('addBond')">加键</button>
-    <button :class="{ active: editMode === 'delete' }" @click="setEditMode('delete')">删除</button>
-    <select v-model="elementChoice" :disabled="editMode !== 'addAtom'" title="新原子元素">
-      <option v-for="opt in elementOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-    </select>
-    <select v-model="bondOrder" :disabled="editMode !== 'addBond'" title="键级">
-      <option :value="1">单键</option>
-      <option :value="2">双键</option>
-      <option :value="3">三键</option>
-    </select>
-    <span class="spacer"></span>
-    <button @click="zoomBy(-1)">缩小</button>
-    <button @click="zoomBy(1)">放大</button>
-    <button @click="fitView">适应窗口</button>
-  </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>有机分子查看器</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="style.css" />
+    <script src="vendor/vue.global.prod.js"></script>
+  </head>
+  <body>
+    <div id="app" v-cloak>
+      <header class="toolbar">
+        <div class="brand">有机分子查看器</div>
+        <button class="primary" @click="pickFile">打开分子…</button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".py,.txt,text/plain"
+          style="display: none"
+          @change="onFileChosen"
+        />
+        <button @click="openNewMolecule">新建分子</button>
+        <button class="primary" @click="openSaveDialog" :disabled="!molecule">
+          重命名&保存
+        </button>
+        <span class="divider"></span>
+        <button
+          :class="{ active: editMode === 'select' }"
+          @click="setEditMode('select')"
+        >
+          选择
+        </button>
+        <button
+          :class="{ active: editMode === 'addAtom' }"
+          @click="setEditMode('addAtom')"
+        >
+          加原子
+        </button>
+        <button
+          :class="{ active: editMode === 'addBond' }"
+          @click="setEditMode('addBond')"
+        >
+          加键
+        </button>
+        <button
+          :class="{ active: editMode === 'delete' }"
+          @click="setEditMode('delete')"
+        >
+          删除
+        </button>
+        <select
+          v-model="elementChoice"
+          :disabled="editMode !== 'addAtom'"
+          title="新原子元素"
+        >
+          <option
+            v-for="opt in elementOptions"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+        <select
+          v-model="bondOrder"
+          :disabled="editMode !== 'addBond'"
+          title="键级"
+        >
+          <option :value="1">单键</option>
+          <option :value="2">双键</option>
+          <option :value="3">三键</option>
+        </select>
+        <span class="spacer"></span>
+        <button title="切换浅色/深色" @click="toggleTheme">
+          {{ theme === "dark" ? "浅色" : "深色" }}
+        </button>
+        <button @click="zoomBy(-1)">缩小</button>
+        <button @click="zoomBy(1)">放大</button>
+        <button @click="fitView">适应窗口</button>
+      </header>
 
-  <main class="layout">
-    <nav class="tabs">
-      <div v-if="!tabs.length" class="tabs-empty">暂无标签<br>打开分子后显示在这里</div>
-      <button
-        v-for="t in tabs"
-        :key="t.id"
-        class="tab"
-        :class="{ active: t.id === activeTabId }"
-        :title="t.source"
-        @click="switchTab(t.id)"
-      >
-        <span class="tab-main">{{ t.name || t.source }}<span v-if="t.dirty" class="dirty" title="未保存">●</span></span>
-        <span class="tab-formula">{{ t.formula }}</span>
-        <span class="tab-close" title="关闭" @click.stop="closeTab(t.id)">×</span>
-      </button>
-    </nav>
-    <section class="canvas-wrap" @dragover.prevent @drop.prevent="onDropFile">
-      <canvas ref="canvas"></canvas>
-    </section>
-    <aside class="info analysis-panel">
-      <div class="panel-tabs">
-        <button :class="{ active: analysisTab === 'info' }" @click="analysisTab = 'info'">信息</button>
-        <button :class="{ active: analysisTab === 'isomers' }" @click="analysisTab = 'isomers'">异构体</button>
-        <button :class="{ active: analysisTab === 'synthesis' }" @click="analysisTab = 'synthesis'">合成</button>
-      </div>
+      <main class="layout">
+        <nav class="tabs">
+          <div v-if="!tabs.length" class="tabs-empty">
+            暂无标签<br />打开分子后显示在这里
+          </div>
+          <button
+            v-for="t in tabs"
+            :key="t.id"
+            class="tab"
+            :class="{ active: t.id === activeTabId }"
+            :title="t.source"
+            @click="switchTab(t.id)"
+          >
+            <span class="tab-main"
+              >{{ t.name || t.source }}<span
+                v-if="t.dirty"
+                class="dirty"
+                title="未保存"
+                >●</span
+              ></span
+            >
+            <span class="tab-formula">{{ t.formula }}</span>
+            <span class="tab-close" title="关闭" @click.stop="closeTab(t.id)"
+              >×</span
+            >
+          </button>
+        </nav>
+        <section
+          class="canvas-wrap"
+          @dragover.prevent
+          @drop.prevent="onDropFile"
+        >
+          <canvas ref="canvas"></canvas>
+        </section>
+        <aside class="info analysis-panel">
+          <div class="panel-tabs">
+            <button
+              :class="{ active: analysisTab === 'info' }"
+              @click="analysisTab = 'info'"
+            >
+              信息
+            </button>
+            <button
+              :class="{ active: analysisTab === 'isomers' }"
+              @click="analysisTab = 'isomers'"
+            >
+              异构体
+            </button>
+            <button
+              :class="{ active: analysisTab === 'synthesis' }"
+              @click="analysisTab = 'synthesis'"
+            >
+              合成
+            </button>
+          </div>
 
-      <section v-if="analysisTab === 'info'" class="panel-body">
-        <h2>分子信息</h2>
-        <div v-if="!molecule" class="empty">
-          请打开一个分子文件（支持把文件拖到画布区域，或点击“打开分子…”）。
-        </div>
-        <dl v-else>
-          <dt>文件</dt><dd>{{ activeSource }}</dd>
-          <dt>名称</dt><dd>{{ molecule.name || '未命名' }}</dd>
-          <dt>分子式</dt><dd v-html="formulaHtml"></dd>
-          <dt>不饱和度</dt><dd>{{ molecule.unsaturation }}</dd>
-          <dt>等位氢</dt><dd>{{ equivalentHydrogenText }}</dd>
-          <dt>环数</dt><dd>{{ molecule.ring_count }}</dd>
-          <dt>原子 / 键 / π 体系</dt>
-            <dd>{{ molecule.atom_count }} / {{ molecule.bond_count }} / {{ molecule.pi_count }}</dd>
-          <dt>连通分量</dt><dd>{{ molecule.component_count }}</dd>
-          <dt>官能团</dt>
-          <dd>
-            <template v-if="molecule.groups.length">
-              <span v-for="g in molecule.groups" :key="g.name + g.atoms.join(',')" class="chip">{{ g.name }}</span>
+          <section v-if="analysisTab === 'info'" class="panel-body">
+            <h2>分子信息</h2>
+            <div v-if="!molecule" class="empty">
+              请打开一个分子文件（支持把文件拖到画布区域，或点击“打开分子…”）。
+            </div>
+            <dl v-else>
+              <dt>文件</dt>
+              <dd>{{ activeSource }}</dd>
+              <dt>名称</dt>
+              <dd>{{ molecule.name || '未命名' }}</dd>
+              <dt>分子式</dt>
+              <dd v-html="formulaHtml"></dd>
+              <dt>不饱和度</dt>
+              <dd>{{ molecule.unsaturation }}</dd>
+              <dt>等位氢</dt>
+              <dd>{{ equivalentHydrogenText }}</dd>
+              <dt>环数</dt>
+              <dd>{{ molecule.ring_count }}</dd>
+              <dt>原子 / 键 / π 体系</dt>
+              <dd>
+                {{ molecule.atom_count }} / {{ molecule.bond_count }} / {{
+                molecule.pi_count }}
+              </dd>
+              <dt>连通分量</dt>
+              <dd>{{ molecule.component_count }}</dd>
+              <dt>官能团</dt>
+              <dd>
+                <template v-if="molecule.groups.length">
+                  <span
+                    v-for="g in molecule.groups"
+                    :key="g.name + g.atoms.join(',')"
+                    class="chip"
+                    >{{ g.name }}</span
+                  >
+                </template>
+                <template v-else>未检出</template>
+              </dd>
+            </dl>
+          </section>
+
+          <section v-else-if="analysisTab === 'isomers'" class="panel-body">
+            <h2>同分异构体</h2>
+            <div v-if="!molecule" class="empty">请先打开分子。</div>
+            <template v-else>
+              <div class="field">
+                <label>基团约束</label>
+                <div class="group-options">
+                  <label
+                    v-for="name in groupOptions"
+                    :key="name"
+                    class="check-option"
+                  >
+                    <input
+                      type="checkbox"
+                      :value="name"
+                      v-model="isomerGroups"
+                    />
+                    <span>{{ name }}</span>
+                  </label>
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label>等位氢</label>
+                  <input
+                    type="text"
+                    v-model="isomerHydrogenPattern"
+                    placeholder="如 1,1,2,3"
+                  />
+                </div>
+                <div class="field">
+                  <label>显示上限</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="500"
+                    v-model.number="isomerLimit"
+                  />
+                </div>
+              </div>
+              <label class="check-row">
+                <input type="checkbox" v-model="isomerAllowExtraRings" />
+                <span>允许额外环</span>
+              </label>
+              <button
+                class="primary block"
+                :disabled="isomerLoading"
+                @click="analyzeIsomers"
+              >
+                {{ isomerLoading ? "分析中…" : "枚举异构体" }}
+              </button>
+              <div v-if="isomerResults.length" class="result-meta">
+                共 {{ isomerTotal }} 个
+                <span v-if="isomerTruncated"
+                  >，显示前 {{ isomerResults.length }} 个</span
+                >
+              </div>
+              <div v-if="isomerResults.length" class="analysis-list">
+                <div
+                  v-for="item in isomerResults"
+                  :key="item.session_id"
+                  class="analysis-row"
+                >
+                  <div>
+                    <strong>{{ item.formula }}</strong>
+                    <span
+                      >DBE {{ item.unsaturation }} · 环 {{ item.ring_count
+                      }}</span
+                    >
+                  </div>
+                  <button @click="openAnalysisMolecule(item)">打开</button>
+                </div>
+              </div>
             </template>
-            <template v-else>未检出</template>
-          </dd>
-        </dl>
-      </section>
+          </section>
 
-      <section v-else-if="analysisTab === 'isomers'" class="panel-body">
-        <h2>同分异构体</h2>
-        <div v-if="!molecule" class="empty">请先打开分子。</div>
-        <template v-else>
-          <div class="field">
-            <label>基团约束</label>
-            <div class="group-options">
-              <label v-for="name in groupOptions" :key="name" class="check-option">
-                <input type="checkbox" :value="name" v-model="isomerGroups">
-                <span>{{ name }}</span>
-              </label>
-            </div>
-          </div>
-          <div class="field-grid">
-            <div class="field">
-              <label>等位氢</label>
-              <input type="text" v-model="isomerHydrogenPattern" placeholder="如 1,1,2,3">
-            </div>
-            <div class="field">
-              <label>显示上限</label>
-              <input type="number" min="1" max="500" v-model.number="isomerLimit">
-            </div>
-          </div>
-          <label class="check-row">
-            <input type="checkbox" v-model="isomerAllowExtraRings">
-            <span>允许额外环</span>
-          </label>
-          <button class="primary block" :disabled="isomerLoading" @click="analyzeIsomers">
-            {{ isomerLoading ? "分析中…" : "枚举异构体" }}
-          </button>
-          <div v-if="isomerResults.length" class="result-meta">
-            共 {{ isomerTotal }} 个
-            <span v-if="isomerTruncated">，显示前 {{ isomerResults.length }} 个</span>
-          </div>
-          <div v-if="isomerResults.length" class="analysis-list">
-            <div v-for="item in isomerResults" :key="item.session_id" class="analysis-row">
-              <div>
-                <strong>{{ item.formula }}</strong>
-                <span>DBE {{ item.unsaturation }} · 环 {{ item.ring_count }}</span>
-              </div>
-              <button @click="openAnalysisMolecule(item)">打开</button>
-            </div>
-          </div>
-        </template>
-      </section>
-
-      <section v-else class="panel-body">
-        <h2>合成路线</h2>
-        <div v-if="!tabs.length" class="empty">请先打开分子。</div>
-        <template v-else>
-          <div class="selector-list">
-            <div v-for="tab in tabs" :key="tab.id" class="selector-row">
-              <span class="selector-name">{{ tab.name || tab.source }}</span>
-              <label>
-                <input type="checkbox"
-                       :checked="synthesisReactantIds.includes(tab.sessionId)"
-                       @change="toggleSynthesisReactant(tab.sessionId, $event)">
-                <span>起始</span>
-              </label>
-              <label>
-                <input type="radio" name="synthesis-target" :value="tab.sessionId" v-model="synthesisTargetId">
-                <span>目标</span>
-              </label>
-            </div>
-          </div>
-          <div class="field-grid">
-            <div class="field">
-              <label>反应名</label>
-              <input type="text" v-model="synthesisReaction" placeholder="可选">
-            </div>
-            <div class="field">
-              <label>条件</label>
-              <input type="text" v-model="synthesisConditions" placeholder="可选">
-            </div>
-          </div>
-          <div class="field-grid">
-            <div class="field">
-              <label>最大步数</label>
-              <input type="number" min="1" max="8" v-model.number="synthesisMaxSteps">
-            </div>
-            <div class="field">
-              <label>路线数</label>
-              <input type="number" min="1" max="20" v-model.number="synthesisMaxRoutes">
-            </div>
-          </div>
-          <button class="primary block" :disabled="synthesisLoading || !synthesisReady" @click="planSynthesis">
-            {{ synthesisLoading ? "规划中…" : "规划路线" }}
-          </button>
-          <div v-if="synthesisRoutes.length" class="analysis-list routes">
-            <div v-for="route in synthesisRoutes" :key="route.index" class="route">
-              <div class="route-header">路线 {{ route.index }} · {{ route.step_count }} 步</div>
-              <div v-if="!route.steps.length" class="step-empty">目标已存在于起始物</div>
-              <div v-for="step in route.steps" :key="step.step_no" class="route-step">
-                <div class="step-title">
-                  {{ step.step_no }}. {{ step.rule_name }}
-                  <span v-if="step.conditions">{{ step.conditions }}</span>
-                </div>
-                <div class="molecule-flow">
-                  <div class="molecule-group">
-                    <button v-for="molecule in step.inputs"
-                            :key="molecule.session_id"
-                            class="molecule-pill"
-                            :title="molecule.formula"
-                            @click="openAnalysisMolecule(molecule)">
-                      {{ molecule.molecule.name || molecule.formula }}
-                    </button>
-                  </div>
-                  <span class="arrow">→</span>
-                  <div class="molecule-group">
-                    <button v-for="molecule in step.outputs"
-                            :key="molecule.session_id"
-                            class="molecule-pill"
-                            :title="molecule.formula"
-                            @click="openAnalysisMolecule(molecule)">
-                      {{ molecule.molecule.name || molecule.formula }}
-                    </button>
-                  </div>
+          <section v-else class="panel-body">
+            <h2>合成路线</h2>
+            <div v-if="!tabs.length" class="empty">请先打开分子。</div>
+            <template v-else>
+              <div class="selector-list">
+                <div v-for="tab in tabs" :key="tab.id" class="selector-row">
+                  <span class="selector-name"
+                    >{{ tab.name || tab.source }}</span
+                  >
+                  <label>
+                    <input
+                      type="checkbox"
+                      :checked="synthesisReactantIds.includes(tab.sessionId)"
+                      @change="toggleSynthesisReactant(tab.sessionId, $event)"
+                    />
+                    <span>起始</span>
+                  </label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="synthesis-target"
+                      :value="tab.sessionId"
+                      v-model="synthesisTargetId"
+                    />
+                    <span>目标</span>
+                  </label>
                 </div>
               </div>
-            </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label>反应名</label>
+                  <input
+                    type="text"
+                    v-model="synthesisReaction"
+                    placeholder="可选"
+                  />
+                </div>
+                <div class="field">
+                  <label>条件</label>
+                  <input
+                    type="text"
+                    v-model="synthesisConditions"
+                    placeholder="可选"
+                  />
+                </div>
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label>最大步数</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="8"
+                    v-model.number="synthesisMaxSteps"
+                  />
+                </div>
+                <div class="field">
+                  <label>路线数</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="20"
+                    v-model.number="synthesisMaxRoutes"
+                  />
+                </div>
+              </div>
+              <button
+                class="primary block"
+                :disabled="synthesisLoading || !synthesisReady"
+                @click="planSynthesis"
+              >
+                {{ synthesisLoading ? "规划中…" : "规划路线" }}
+              </button>
+              <div v-if="synthesisRoutes.length" class="analysis-list routes">
+                <div
+                  v-for="route in synthesisRoutes"
+                  :key="route.index"
+                  class="route"
+                >
+                  <div class="route-header">
+                    路线 {{ route.index }} · {{ route.step_count }} 步
+                  </div>
+                  <div v-if="!route.steps.length" class="step-empty">
+                    目标已存在于起始物
+                  </div>
+                  <div
+                    v-for="step in route.steps"
+                    :key="step.step_no"
+                    class="route-step"
+                  >
+                    <div class="step-title">
+                      {{ step.step_no }}. {{ step.rule_name }}
+                      <span v-if="step.conditions">{{ step.conditions }}</span>
+                    </div>
+                    <div class="molecule-flow">
+                      <div class="molecule-group">
+                        <button
+                          v-for="molecule in step.inputs"
+                          :key="molecule.session_id"
+                          class="molecule-pill"
+                          :title="molecule.formula"
+                          @click="openAnalysisMolecule(molecule)"
+                        >
+                          {{ molecule.molecule.name || molecule.formula }}
+                        </button>
+                      </div>
+                      <span class="arrow">→</span>
+                      <div class="molecule-group">
+                        <button
+                          v-for="molecule in step.outputs"
+                          :key="molecule.session_id"
+                          class="molecule-pill"
+                          :title="molecule.formula"
+                          @click="openAnalysisMolecule(molecule)"
+                        >
+                          {{ molecule.molecule.name || molecule.formula }}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="statusbar">
+        <span v-if="error" class="error">⚠ {{ error }}</span>
+        <span v-else>{{ status }}</span>
+        <span class="warn"
+          >提示：分子文件会执行其中的代码，请只加载可信文件。</span
+        >
+      </footer>
+
+      <div
+        v-if="showSaveDialog"
+        class="dialog-mask"
+        @click.self="showSaveDialog = false"
+      >
+        <div class="dialog">
+          <h3>保存分子</h3>
+          <input
+            type="text"
+            v-model="savePath"
+            placeholder="如 demo_output\分子.py"
+            @keydown.enter="confirmSave"
+          />
+          <div class="dialog-actions">
+            <button class="primary" @click="confirmSave">保存</button>
+            <button @click="showSaveDialog = false">取消</button>
           </div>
-        </template>
-      </section>
-    </aside>
-  </main>
-
-  <footer class="statusbar">
-    <span v-if="error" class="error">⚠ {{ error }}</span>
-    <span v-else>{{ status }}</span>
-    <span class="warn">提示：分子文件会执行其中的代码，请只加载可信文件。</span>
-  </footer>
-
-  <div v-if="showSaveDialog" class="dialog-mask" @click.self="showSaveDialog = false">
-    <div class="dialog">
-      <h3>保存分子</h3>
-      <input type="text" v-model="savePath" placeholder="如 demo_output\分子.py" @keydown.enter="confirmSave">
-      <div class="dialog-actions">
-        <button class="primary" @click="confirmSave">保存</button>
-        <button @click="showSaveDialog = false">取消</button>
+        </div>
       </div>
     </div>
-  </div>
-</div>
-<script src="app.js"></script>
-</body>
+    <script src="app.js"></script>
+  </body>
 </html>
