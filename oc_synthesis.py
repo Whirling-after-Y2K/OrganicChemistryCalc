@@ -136,6 +136,18 @@ def _fp(molecule: oc.Molecule) -> _Fp:
     return tuple(molecule.feature)
 
 
+def _resolve_named(
+    molecule: oc.Molecule,
+    registry: dict[_Fp, oc.Molecule],
+) -> oc.Molecule:
+    """同结构分子优先取仓库中已登记的实例，以保留用户命名。
+
+    反合成模板拆出的片段本身没有名称；若该结构已在仓库中（起始反应物、
+    目标产物或此前某步的产物），改用登记实例，路线步骤里显示的就是原名。
+    """
+    return registry.get(_fp(molecule), molecule)
+
+
 def _total_h(atom: oc.Atom) -> int:
     explicit = sum(1 for bond in atom.bonds if bond.other(atom).name == "h")
     return atom.implicit_h + explicit
@@ -1074,7 +1086,9 @@ def _backward_expand(
         molecule = registry[key]
         for template in templates:
             rule = rules_by_name[template.forward_rule_name]
-            for reactants in template.generate(molecule):
+            for generated in template.generate(molecule):
+                # 先换成仓库中的命名实例再验证：结构判等不变，步骤输入保留原名
+                reactants = [_resolve_named(item, registry) for item in generated]
                 validated = _validate_retro(molecule, reactants, rule)
                 if validated is None:
                     continue

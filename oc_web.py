@@ -308,9 +308,13 @@ def _molecule_payload(
 ) -> dict[str, Any]:
     """生成带会话编号的完整前端载荷。"""
     session_id = _register_molecule(molecule, source)
+    payload = oc_render.molecule_to_payload(molecule, source)
     return {
         "session_id": session_id,
-        "molecule": oc_render.molecule_to_payload(molecule, source),
+        # 名称与分子式同时平铺到外层：路线/异构体列表直接渲染，无需深入嵌套载荷
+        "name": payload["name"] or "",
+        "formula": payload["formula"],
+        "molecule": payload,
     }
 
 
