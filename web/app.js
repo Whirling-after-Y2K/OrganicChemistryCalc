@@ -1,4 +1,8 @@
-/* 有机分子查看器前端：Vue 3 + Canvas 渲染。 */
+/* 有机分子查看器前端：Vue 3 + Canvas 渲染。
+   编辑操作统一走 /api/edit：add_atom / add_atom_bonded / add_benzene / add_nitro /
+   add_bond / set_bond_order / del_atom / del_bond。
+   苯环、硝基需先在"选择"模式点选锚点原子；删除 π 体系成员原子时后端会移除整个
+   π 体系，但只删除被点击的那个原子，其余成员保留。 */
 "use strict";
 
 const { createApp } = Vue;

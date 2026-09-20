@@ -693,7 +693,15 @@ def add_active_h(target_atom: Atom) -> ActiveH:
 
 
 def del_atom(atom: Atom) -> None:
-    """删除原子：清理其所有键与 π 体系参与，并从分子中移除。"""
+    """删除原子：清理其所有键与 π 体系参与，并从分子中移除。
+
+    π 体系处理：只把该原子从每个所属 π 体系中摘除；摘除后成员数不足 2 个时才
+    移除整个 π 体系，否则保留剩余成员（剩余成员空出的价键槽位按隐式氢补足）。
+    所以单独调用本函数删苯环/硝基成员时，π 体系本身不会被删掉。
+    Web 编辑器（oc_web.edit_molecule() 的 del_atom 分支）删除 π 体系成员时，
+    就是删掉整个 π 体系：先对该原子所在的每个 π 体系调用 remove_pi_system()，
+    再调用本函数删除该原子；π 体系的其余成员原子保留在分子中，不被连带删除。
+    """
     molecule = atom.belong
     for bond in list(atom.bonds):
         for endpoint in bond.atoms:

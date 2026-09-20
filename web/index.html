@@ -46,6 +46,7 @@
         <button
           :class="{ active: editMode === 'delete' }"
           @click="setEditMode('delete')"
+          title="删除原子或键；删除 π 体系成员时移除整个 π 体系，其余原子保留"
         >
           删除
         </button>
@@ -71,8 +72,18 @@
           <option :value="2">双键</option>
           <option :value="3">三键</option>
         </select>
-        <button @click="addStructure('add_benzene')">苯环</button>
-        <button @click="addStructure('add_nitro')">硝基</button>
+        <button
+          title="在选择模式点击锚点原子后，在该原子上接入苯环"
+          @click="addStructure('add_benzene')"
+        >
+          苯环
+        </button>
+        <button
+          title="在选择模式点击碳锚点后，在该原子上接入硝基"
+          @click="addStructure('add_nitro')"
+        >
+          硝基
+        </button>
         <span class="spacer"></span>
         <button title="切换浅色/深色" @click="toggleTheme">
           {{ theme === "dark" ? "浅色" : "深色" }}

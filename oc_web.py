@@ -12,6 +12,9 @@
                            {"filename": ..., "content": ...}
     POST /api/templates/<template>
                            新建内置模板分子：benzene / nitro
+    POST /api/edit         编辑会话分子：{"session_id", "op", ...}，
+                           成功后返回最新载荷；π 体系编辑约定见
+                           edit_molecule() 的 docstring
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -283,6 +286,7 @@ def _add_nitro_to_atom(molecule: oc.Molecule, anchor: oc.Atom) -> None:
 
 
 def _in_any_pi(atom: oc.Atom) -> bool:
+    """判断原子是否属于某个 π 体系（苯环或硝基的成员）。"""
     return any(atom in pi.atoms for pi in atom.belong.pi_systems)
 
 
@@ -633,7 +637,25 @@ def analysis_job(job_id: str) -> Any:
 
 @app.post("/api/edit")
 def edit_molecule() -> Any:
-    """编辑分子：{session_id, op, ...}；成功后返回最新载荷。"""
+    """编辑会话分子：请求体 {"session_id": ..., "op": ..., ...}，成功后返回最新载荷。
+
+    支持的 op：
+        add_atom          新增孤立原子：{element}
+        add_atom_bonded   在锚点原子上接一个新原子并成单键：{atom, element}
+        add_benzene       在锚点原子上接入苯环（六元碳环 + π 体系）：{atom}
+        add_nitro         在碳锚点上接入硝基（C-N + [N,O,O] π 体系）：{atom}
+        add_bond          两原子间补键或升键级：{atom1, atom2, order}
+        set_bond_order    把键级设为 order：{atom1, atom2, order}
+        del_atom          删除单个原子：{atom}
+        del_bond          删除两原子间的键：{atom1, atom2}
+
+    π 体系（苯环、硝基）编辑约定：
+        add_benzene / add_nitro / del_atom 都先在分子副本上修改，全部校验通过后
+        才替换 session["molecule"]，任一步失败都会话分子保持原样。
+        del_atom 删除 π 体系成员时：先移除该原子所在的全部 π 体系，再删除这个
+        原子本身；π 体系的其余成员原子保留在分子中，不会被连带删除。
+        set_bond_order / del_bond 只要有一端原子在 π 体系内就拒绝执行。
+    """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
