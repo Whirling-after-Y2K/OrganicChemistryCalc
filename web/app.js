@@ -689,9 +689,14 @@ const viewerApp = createApp({
       if (ok) this.status = "已设置键级";
     },
     async deleteAtom(atomId) {
+      const wasInPi = this.molecule.pi_systems.some((pi) =>
+        pi.atoms.includes(atomId)
+      );
       const ok = await this.editApi({ op: "del_atom", atom: atomId });
       this.pendingAtom = null;
-      if (ok) this.status = "已删除原子";
+      if (ok) {
+        this.status = wasInPi ? "已删除原子及其 π 体系" : "已删除原子";
+      }
     },
     async deleteBond(bond) {
       const ok = await this.editApi({

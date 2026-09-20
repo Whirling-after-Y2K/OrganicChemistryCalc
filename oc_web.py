@@ -691,10 +691,14 @@ def edit_molecule() -> Any:
             elif order < bond.order:
                 oc.break_bond(atom1, atom2, bond.order - order)
         elif op == "del_atom":
-            atom = _atom_at(molecule, body.get("atom"))
-            if _in_any_pi(atom):
-                raise ValueError("该原子参与 π 体系，暂不支持删除")
-            oc.del_atom(atom)
+            # 在副本上删除：只删除被点击的 π 成员原子，并移除其 π 体系。
+            edited_molecule = oc.copy_molecule(molecule)
+            edited_atom = _atom_at(edited_molecule, body.get("atom"))
+            for pi in list(edited_atom.belong.pi_systems):
+                if edited_atom in pi.atoms:
+                    oc.remove_pi_system(pi)
+            oc.del_atom(edited_atom)
+            session["molecule"] = edited_molecule
         elif op == "del_bond":
             atom1 = _atom_at(molecule, body.get("atom1"))
             atom2 = _atom_at(molecule, body.get("atom2"))
