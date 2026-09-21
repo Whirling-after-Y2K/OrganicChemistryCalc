@@ -1037,7 +1037,7 @@ def save_isomers(
 ) -> list[Path]:
     """把全部异构体保存为构建脚本（oc_io），返回文件路径列表。
 
-    目录结构：<directory>/<公式键>/isomer_01.py、isomer_02.py...
+    目录结构：<directory>/<公式键>/isomer_01.mol、isomer_02.mol...
     """
     isomers = find_isomers(
         molecule, required_groups, equivalent_hydrogens=equivalent_hydrogens
@@ -1046,7 +1046,7 @@ def save_isomers(
     folder.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index, candidate in enumerate(isomers, 1):
-        path = folder / f"isomer_{index:02d}.py"
+        path = folder / f"isomer_{index:02d}{oc_io.MOLECULE_SUFFIX}"
         oc_io.save_molecule(candidate, path)
         paths.append(path)
     return paths

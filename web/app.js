@@ -37,6 +37,8 @@ const CANVAS_THEME = {
 const BOND_LEN = 40;
 // 原子字号 = 键长 / 1.5，保证任意缩放下 键长 : 原子大小 ≈ 1.5 : 1
 const ATOM_FONT_RATIO = BOND_LEN / 2;
+// 分子文件后缀：内容仍是 Python 构建脚本，需与 oc_io.MOLECULE_SUFFIX 一致
+const MOLECULE_SUFFIX = ".mol";
 
 function toSubscript(text) {
   const digits = "₀₁₂₃₄₅₆₇₈₉";
@@ -280,9 +282,9 @@ const viewerApp = createApp({
     async openNewMolecule() {
       this.error = "";
       const key = "new:" + performance.now() + ":" + Math.random().toString(36).slice(2);
-      await this.performLoad({ path: "new.py" }, {
+      await this.performLoad({ path: "new.mol" }, {
         key,
-        displaySource: "new.py",
+        displaySource: "new.mol",
       });
     },
     async duplicateMolecule() {
@@ -816,11 +818,14 @@ const viewerApp = createApp({
     // ---- 分子保存 ----
     saveSuggestedName() {
       const tab = this.tabs.find((t) => t.id === this.activeTabId);
-      if (!tab) return "molecule.py";
+      if (!tab) return "molecule" + MOLECULE_SUFFIX;
       // 已保存过的文件沿用原文件名，新分子用名称或分子式兜底
       const fromPath = (tab.originalPath || "").split(/[\\/]/).pop();
-      if (fromPath) return fromPath;
-      return (tab.name || tab.formula || "molecule") + ".py";
+      if (fromPath) {
+        // 旧版 .py 文件改按 .mol 建议，避开浏览器下载警告
+        return fromPath.replace(/\.py$/i, MOLECULE_SUFFIX);
+      }
+      return (tab.name || tab.formula || "molecule") + MOLECULE_SUFFIX;
     },
     rejectDisconnectedSave(tab) {
       const count = tab?.molecule?.component_count;
@@ -847,7 +852,7 @@ const viewerApp = createApp({
         const handle = await window.showSaveFilePicker({
           suggestedName: this.saveSuggestedName(),
           types: [
-            { description: "分子构建脚本", accept: { "text/plain": [".py"] } },
+            { description: "分子构建脚本（.mol）", accept: { "text/plain": [MOLECULE_SUFFIX] } },
           ],
         });
         const exported = await this.postJson("/api/export", {
@@ -877,7 +882,7 @@ const viewerApp = createApp({
       if (!tab) return;
       this.savePath =
         tab.originalPath ||
-        "demo_output\\" + (tab.formula || "molecule") + ".py";
+        "demo_output\\" + (tab.formula || "molecule") + MOLECULE_SUFFIX;
       this.showSaveDialog = true;
     },
     async confirmSave() {

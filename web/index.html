@@ -16,7 +16,7 @@
         <input
           ref="fileInput"
           type="file"
-          accept=".py,.txt,text/plain"
+          accept=".mol"
           style="display: none"
           @change="onFileChosen"
         />
@@ -29,7 +29,7 @@
         <input
           ref="importInput"
           type="file"
-          accept=".py,.txt,text/plain"
+          accept=".mol"
           style="display: none"
           @change="onImportFileChosen"
         />
@@ -447,12 +447,12 @@
         <div class="dialog">
           <h3>保存分子</h3>
           <p class="dialog-hint">
-            当前浏览器不支持系统保存对话框，请手动输入保存路径。
+            当前浏览器不支持系统保存对话框，请手动输入保存路径；仅支持 .mol 后缀，未写后缀时自动补 .mol。
           </p>
           <input
             type="text"
             v-model="savePath"
-            placeholder="如 demo_output\分子.py"
+            placeholder="如 demo_output\分子.mol"
             @keydown.enter="confirmSave"
           />
           <div class="dialog-actions">

@@ -845,7 +845,11 @@ def edit_molecule() -> Any:
 
 @app.post("/api/save")
 def save_molecule() -> Any:
-    """保存分子为本地构建脚本：{session_id, path}。"""
+    """保存分子为本地构建脚本：{session_id, path}。
+
+    路径统一以 .mol 结尾：未写后缀或写了其他后缀（含旧版 .py）时，
+    直接在末尾补上 .mol，与前端文件管理器只呈现 .mol 的约定保持一致。
+    """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
@@ -854,6 +858,7 @@ def save_molecule() -> Any:
         path = str(body.get("path") or "").strip()
         if not path:
             raise ValueError("保存路径不能为空")
+        path = oc_io.with_molecule_suffix(path)
         molecule_name = Path(path).stem
         if not molecule_name:
             raise ValueError("保存文件名不能为空")
@@ -872,6 +877,8 @@ def export_molecule() -> Any:
     """导出会话分子的构建脚本文本：{session_id, filename} -> {filename, content}。
 
     文件名（不含目录）同时用作分子名，与 /api/save 的"重命名&保存"行为一致；
+    文件名统一以 .mol 结尾：未写后缀或写了其他后缀（含旧版 .py）时直接在
+    末尾补上 .mol（内容仍是 Python，后缀只为规避浏览器对 .py 的下载警告）；
     文本由前端写入用户在系统保存对话框里选定的文件。
     """
     body = request.get_json(silent=True)
@@ -880,6 +887,7 @@ def export_molecule() -> Any:
     try:
         session = _get_session(str(body.get("session_id") or ""))
         filename = str(body.get("filename") or "").strip()
+        filename = oc_io.with_molecule_suffix(filename)
         molecule_name = Path(filename).stem
         if not molecule_name:
             raise ValueError("文件名不能为空")
