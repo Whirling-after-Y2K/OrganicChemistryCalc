@@ -252,6 +252,9 @@ input::placeholder { color: var(--text-muted); opacity: 1; }
   box-shadow: 0 8px 30px var(--shadow);
 }
 .dialog h3 { font-size: 15px; margin-bottom: 12px; color: var(--text); }
+.dialog-hint {
+  margin: -4px 0 12px; font-size: 12px; line-height: 1.5; color: var(--text-muted);
+}
 .dialog input[type="text"] {
   width: 100%; padding: 7px 9px; border: 1px solid var(--border-strong);
   border-radius: 6px; font-size: 13px;

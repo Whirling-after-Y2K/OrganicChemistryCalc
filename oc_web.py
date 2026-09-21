@@ -17,6 +17,8 @@
                           edit_molecule() 的 docstring
     POST /api/duplicate    复制会话分子为新的编辑会话：{"session_id"}，
                            返回新会话编号与副本载荷（深拷贝，编辑互不影响）
+    POST /api/export       导出会话分子的构建脚本文本：{"session_id", "filename"}，
+                            返回 {"filename", "content"}，供前端用系统保存对话框写文件
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -798,6 +800,37 @@ def save_molecule() -> Any:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"ok": False, "error": f"保存失败：{exc}"}), 400
+
+
+@app.post("/api/export")
+def export_molecule() -> Any:
+    """导出会话分子的构建脚本文本：{session_id, filename} -> {filename, content}。
+
+    文件名（不含目录）同时用作分子名，与 /api/save 的"重命名&保存"行为一致；
+    文本由前端写入用户在系统保存对话框里选定的文件。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
+    try:
+        session = _get_session(str(body.get("session_id") or ""))
+        filename = str(body.get("filename") or "").strip()
+        molecule_name = Path(filename).stem
+        if not molecule_name:
+            raise ValueError("文件名不能为空")
+        previous_name = session["molecule"].name
+        session["molecule"].name = molecule_name
+        try:
+            # 末尾补换行，与 oc_io.save_molecule 写出的文件保持一致
+            content = oc_io.molecule_to_code(session["molecule"]) + "\n"
+        except Exception:
+            session["molecule"].name = previous_name  # 校验失败时回滚改名
+            raise
+        return jsonify({"ok": True, "filename": filename, "content": content})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"导出失败：{exc}"}), 400
 
 
 @app.post("/api/synthesis")

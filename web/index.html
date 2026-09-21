@@ -28,7 +28,12 @@
         >
           复制
         </button>
-        <button class="primary" @click="openSaveDialog" :disabled="!molecule">
+        <button
+          class="primary"
+          title="在系统文件管理器中选择保存位置，文件名即分子名"
+          :disabled="!molecule"
+          @click="saveMolecule"
+        >
           重命名&保存
         </button>
         <span class="divider"></span>
@@ -414,6 +419,9 @@
       >
         <div class="dialog">
           <h3>保存分子</h3>
+          <p class="dialog-hint">
+            当前浏览器不支持系统保存对话框，请手动输入保存路径。
+          </p>
           <input
             type="text"
             v-model="savePath"
