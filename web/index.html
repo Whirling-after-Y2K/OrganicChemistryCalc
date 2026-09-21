@@ -21,6 +21,13 @@
           @change="onFileChosen"
         />
         <button @click="openNewMolecule">新建分子</button>
+        <button
+          title="复制当前标签页的分子，在新标签页中打开"
+          :disabled="!molecule"
+          @click="duplicateMolecule"
+        >
+          复制
+        </button>
         <button class="primary" @click="openSaveDialog" :disabled="!molecule">
           重命名&保存
         </button>

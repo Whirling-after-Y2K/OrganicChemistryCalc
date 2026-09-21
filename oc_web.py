@@ -13,8 +13,10 @@
     POST /api/templates/<template>
                            新建内置模板分子：benzene / nitro
     POST /api/edit         编辑会话分子：{"session_id", "op", ...}，
-                           成功后返回最新载荷；π 体系编辑约定见
-                           edit_molecule() 的 docstring
+                          成功后返回最新载荷；π 体系编辑约定见
+                          edit_molecule() 的 docstring
+    POST /api/duplicate    复制会话分子为新的编辑会话：{"session_id"}，
+                           返回新会话编号与副本载荷（深拷贝，编辑互不影响）
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -249,6 +251,38 @@ def create_template_molecule(template: str) -> Any:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"ok": False, "error": f"新建模板失败：{exc}"}), 400
+
+
+@app.post("/api/duplicate")
+def duplicate_molecule() -> Any:
+    """把会话分子深拷贝成新的编辑会话：请求体 {"session_id": ...}。
+
+    副本与原分子结构完全相同但相互独立（oc.copy_molecule 深拷贝），
+    编辑任一方都不会影响另一方；供前端“复制”按钮新开标签页使用。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
+    try:
+        session = _get_session(str(body.get("session_id") or ""))
+        source = str(session.get("source") or "")
+        molecule = oc.copy_molecule(session["molecule"])
+        session_id = uuid.uuid4().hex
+        _SESSIONS[session_id] = {
+            "molecule": molecule,
+            "source": source,
+        }
+        return jsonify(
+            {
+                "ok": True,
+                "session_id": session_id,
+                "molecule": oc_render.molecule_to_payload(molecule, source),
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"复制分子失败：{exc}"}), 400
 
 
 def _atom_at(molecule: oc.Molecule, atom_id: object) -> oc.Atom:

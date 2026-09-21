@@ -228,6 +228,49 @@ const viewerApp = createApp({
         displaySource: "new.py",
       });
     },
+    async duplicateMolecule() {
+      const tab = this.activeTab;
+      if (!tab || !tab.sessionId) {
+        this.error = "没有可复制的分子";
+        this.status = "";
+        return;
+      }
+      this.error = "";
+      this.status = "正在复制…";
+      try {
+        const response = await fetch("/api/duplicate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: tab.sessionId }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          this.error = data.error || "复制失败";
+          this.status = "";
+          return;
+        }
+        const loaded = data.molecule;
+        const copy = {
+          id: this.nextTabId++,
+          // 每次复制都拿到新 session_id，因此 key 唯一，不会并入已有标签页
+          key: "copy:" + data.session_id,
+          source: (tab.source || loaded.source || "") + " 副本",
+          name: loaded.name || "",
+          formula: loaded.formula || "",
+          molecule: loaded,
+          sessionId: data.session_id,
+          originalPath: "",
+          dirty: false,
+        };
+        this.tabs.push(copy);
+        this.activeTabId = copy.id;
+        this.status = "已复制：" + copy.source;
+        this.$nextTick(() => this.fitView());
+      } catch (err) {
+        this.error = "请求失败：" + err.message;
+        this.status = "";
+      }
+    },
     async openTemplate(templateName) {
       const option = TEMPLATE_OPTIONS[templateName];
       if (!option) {
