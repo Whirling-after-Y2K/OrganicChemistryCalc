@@ -20,6 +20,19 @@
           style="display: none"
           @change="onFileChosen"
         />
+        <button
+          title="把分子文件加入当前标签页；尚未打开分子时改为新建标签页"
+          @click="pickImportFile"
+        >
+          导入
+        </button>
+        <input
+          ref="importInput"
+          type="file"
+          accept=".py,.txt,text/plain"
+          style="display: none"
+          @change="onImportFileChosen"
+        />
         <button @click="openNewMolecule">新建分子</button>
         <button
           title="复制当前标签页的分子，在新标签页中打开"
