@@ -12,8 +12,9 @@
 - 隐氢约定：产物氢优先以隐氢自动平衡（自由价变化自动调整）；必须显式进入
   副产物的 H/X 由规则显式构造，并删除不再属于产物的游离原子。
 - 元素限制：元素表仅 C/N/O/H/F/Cl/Br/I。涉及 Na/K/Cu/Ag/Mn/S 等的反应以
-  可表示的等价形式表达（如卤代烃水解写 R-X + H2O → R-OH + HX，消去写
-  R-X → 烯烃 + HX），NaOH/浓硫酸等仅作为条件关键词，不作为反应物。
+   可表示的等价形式表达（如卤代烃水解写 R-X + H2O → R-OH + HX，其逆过程
+   醇卤代写 R-OH + HX → R-X + H2O，消去写 R-X → 烯烃 + HX），
+  NaOH/浓硫酸等仅作为条件关键词，不作为反应物。
 - 不对称烯烃 HX/H2O 加成只出马氏规则主产物；卤代烃/醇消去按位点枚举全部
   不同烯烃；苯环取代结合定位效应只取有利位点（邻对位/间位）。
 
@@ -776,6 +777,32 @@ def _build_rules() -> tuple[ReactionRule, ...]:
             apply,
         )
 
+    def rule_alcohol_halogenation() -> ReactionRule:
+        alcohol, c, o = _pattern_alcohol()
+        hx, h, x = _pattern_hx()
+
+        def apply(ctx: ReactionContext) -> list[oc.Molecule]:
+            carbon = ctx.atom(0, c)
+            o_atom = ctx.atom(0, o)
+            h_atom = ctx.atom(1, h)
+            x_atom = ctx.atom(1, x)
+            if not _is_halogen(x_atom):
+                raise ValueError("醇卤代要求 HX 中的 X 为卤素")
+            if _is_carbonyl_carbon(carbon):
+                raise ValueError("醇卤代不适用于羧酸羟基")
+            oc.break_bond(carbon, o_atom)  # 脱去羟基
+            oc.break_bond(h_atom, x_atom)
+            oc.add_bond(carbon, x_atom)
+            # HX 的 H 与脱去的羟基组成水，由隐氢自动平衡，故删除该游离氢
+            oc.del_atom(h_atom)
+            return []
+
+        return ReactionRule(
+            "醇卤代", "取代", "加热",
+            [ReactantSpec(0, pattern=alcohol), ReactantSpec(1, pattern=hx)],
+            apply,
+        )
+
     def rule_alcohol_etherification() -> ReactionRule:
         pattern, c, o = _pattern_alcohol()
 
@@ -1065,6 +1092,7 @@ def _build_rules() -> tuple[ReactionRule, ...]:
     rules.append(rule_alkane_halogenation())
     rules.append(rule_benzene_halogenation())
     rules.append(rule_benzene_nitration())
+    rules.append(rule_alcohol_halogenation())
     rules.append(rule_alcohol_etherification())
     rules.append(rule_phenol_bromine())
     rules.append(rule_haloalkane_elimination())

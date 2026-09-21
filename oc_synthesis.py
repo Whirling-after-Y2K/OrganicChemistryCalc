@@ -111,6 +111,7 @@ _REAGENT_INPUTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "烷烃卤代": ((), ("Cl2", "Br2")),
     "苯卤代": ((), ("Cl2", "Br2")),
     "苯硝化": ((), ("HNO3",)),
+    "醇卤代": ((), ("HCl", "HBr")),
     "醇分子间脱水": ((),),
     "苯酚与溴水": ((), ("Br2",)),
     "卤代烃消去": ((),),
@@ -557,7 +558,7 @@ def _validate_retro(
 
 
 def _build_retro_templates() -> list[_RetroTemplate]:
-    """构建 18 条反合成模板（均以对应正向规则做验证）。"""
+    """构建 19 条反合成模板（均以对应正向规则做验证）。"""
     templates: list[_RetroTemplate] = []
 
     # 1. 烷烃 -> 烯烃（烯烃加氢的逆向）
@@ -1066,6 +1067,30 @@ def _build_retro_templates() -> list[_RetroTemplate]:
         return results
 
     templates.append(_RetroTemplate("酯→羧酸+醇", "酯化反应", gen_ester_to_acid_alcohol))
+
+    # 19. 卤代烃 -> 醇（醇卤代的逆向）
+    def gen_haloalkane_to_alcohol(m: oc.Molecule) -> list[list[oc.Molecule]]:
+        results: list[list[oc.Molecule]] = []
+        for atom in m.atoms:
+            if atom.name != "c" or _in_pi(atom) or _has_multiple_bond(atom):
+                continue
+            if _is_carbonyl_carbon(atom):
+                continue
+            x = _single_halogen_neighbor(atom)
+            if x is None:
+                continue
+            working, atom_map = _copy_with_map(m)
+            try:
+                oc.del_atom(atom_map[x])
+                oc.add_bond(atom_map[atom], oc.Atom("o", working))
+            except ValueError:
+                continue
+            components = _organic_components(working)
+            if len(components) == 1:
+                results.append(components)
+        return results
+
+    templates.append(_RetroTemplate("卤代烃→醇", "醇卤代", gen_haloalkane_to_alcohol))
 
     return templates
 
