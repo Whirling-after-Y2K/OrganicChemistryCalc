@@ -100,6 +100,8 @@ const viewerApp = createApp({
       synthesisConditions: "",
       synthesisMaxSteps: 4,
       synthesisMaxRoutes: 5,
+      synthesisDedupeStrategy: true,
+      synthesisOptimalOnly: true,
       synthesisRoutes: [],
       synthesisLoading: false,
       zoom: 1,
@@ -546,6 +548,8 @@ const viewerApp = createApp({
           conditions: this.synthesisConditions,
           max_steps: this.synthesisMaxSteps,
           max_routes: this.synthesisMaxRoutes,
+          dedupe_strategy: this.synthesisDedupeStrategy,
+          optimal_only: this.synthesisOptimalOnly,
         });
         const data = await this.pollAnalysisJob(
           submitted.job_id,

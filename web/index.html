@@ -356,6 +356,20 @@
                   />
                 </div>
               </div>
+              <label
+                class="check-row"
+                title="所用反应原理的集合相同的路线只保留最短的一条"
+              >
+                <input type="checkbox" v-model="synthesisDedupeStrategy" />
+                <span>同思路去重</span>
+              </label>
+              <label
+                class="check-row"
+                title="只保留总步数最少的路线"
+              >
+                <input type="checkbox" v-model="synthesisOptimalOnly" />
+                <span>仅最短路线</span>
+              </label>
               <button
                 class="primary block"
                 :disabled="synthesisLoading || !synthesisReady"

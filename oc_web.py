@@ -418,6 +418,22 @@ def _parse_positive_int(
     return result
 
 
+def _parse_bool(body: dict[str, Any], name: str, default: bool) -> bool:
+    """解析布尔开关：接受 JSON 布尔、0/1 与 "true"/"false"/"1"/"0" 字符串。"""
+    value = body.get(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1"}:
+            return True
+        if lowered in {"false", "0"}:
+            return False
+    raise ValueError(f"{name} 必须为布尔值")
+
+
 def _isomer_analysis_result(
     molecule: oc.Molecule,
     required_groups: list[str],
@@ -506,6 +522,8 @@ def _synthesis_analysis_result(
     category: str | None,
     max_steps: int,
     max_routes: int,
+    dedupe_strategy: bool,
+    optimal_only: bool,
 ) -> dict[str, Any]:
     """执行合成路线规划并序列化为前端载荷。"""
     routes = oc_synthesis.plan_synthesis(
@@ -516,6 +534,8 @@ def _synthesis_analysis_result(
         category=category,
         max_steps=max_steps,
         max_routes=max_routes,
+        dedupe_strategy=dedupe_strategy,
+        optimal_only=optimal_only,
     )
     serialized: list[dict[str, Any]] = []
     for route_index, route in enumerate(routes, 1):
@@ -565,6 +585,8 @@ def _parse_synthesis_request(
     str | None,
     int,
     int,
+    bool,
+    bool,
 ]:
     """解析并快照合成规划请求。"""
     raw_reactants = body.get("reactant_ids")
@@ -586,6 +608,8 @@ def _parse_synthesis_request(
         str(body.get("category") or "").strip() or None,
         _parse_positive_int(body, "max_steps", oc_synthesis.DEFAULT_MAX_STEPS, 8),
         _parse_positive_int(body, "max_routes", 5, 20),
+        _parse_bool(body, "dedupe_strategy", True),
+        _parse_bool(body, "optimal_only", True),
     )
 
 
@@ -876,9 +900,17 @@ def plan_route() -> Any:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
-        reactants, target, reaction, conditions, category, max_steps, max_routes = (
-            _parse_synthesis_request(body)
-        )
+        (
+            reactants,
+            target,
+            reaction,
+            conditions,
+            category,
+            max_steps,
+            max_routes,
+            dedupe_strategy,
+            optimal_only,
+        ) = _parse_synthesis_request(body)
         return jsonify(
             _synthesis_analysis_result(
                 reactants,
@@ -888,6 +920,8 @@ def plan_route() -> Any:
                 category,
                 max_steps,
                 max_routes,
+                dedupe_strategy,
+                optimal_only,
             )
         )
     except ValueError as exc:
@@ -903,9 +937,17 @@ def start_synthesis_job() -> Any:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
-        reactants, target, reaction, conditions, category, max_steps, max_routes = (
-            _parse_synthesis_request(body)
-        )
+        (
+            reactants,
+            target,
+            reaction,
+            conditions,
+            category,
+            max_steps,
+            max_routes,
+            dedupe_strategy,
+            optimal_only,
+        ) = _parse_synthesis_request(body)
         job_id = _start_analysis_job(
             "synthesis",
             lambda: _synthesis_analysis_result(
@@ -916,6 +958,8 @@ def start_synthesis_job() -> Any:
                 category,
                 max_steps,
                 max_routes,
+                dedupe_strategy,
+                optimal_only,
             ),
         )
         return jsonify({"ok": True, "job_id": job_id, "poll_interval_ms": ANALYSIS_POLL_INTERVAL_MS}) 
