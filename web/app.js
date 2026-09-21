@@ -100,6 +100,8 @@ const viewerApp = createApp({
       synthesisConditions: "",
       synthesisMaxSteps: 4,
       synthesisMaxRoutes: 5,
+      synthesisDedupeStrategy: true,
+      synthesisOptimalOnly: true,
       synthesisRoutes: [],
       synthesisLoading: false,
       zoom: 1,
@@ -491,6 +493,8 @@ const viewerApp = createApp({
           conditions: this.synthesisConditions,
           max_steps: this.synthesisMaxSteps,
           max_routes: this.synthesisMaxRoutes,
+          dedupe_strategy: this.synthesisDedupeStrategy,
+          optimal_only: this.synthesisOptimalOnly,
         });
         const data = await this.pollAnalysisJob(
           submitted.job_id,
@@ -754,6 +758,54 @@ const viewerApp = createApp({
       this.pendingAtom = null;
       if (ok) this.status = "已删除键";
     },
+    // ---- 分子保存 ----
+    saveSuggestedName() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (!tab) return "molecule.py";
+      // 已保存过的文件沿用原文件名，新建分子用名称或分子式兜底
+      const fromPath = (tab.originalPath || "").split(/[\\/]/).pop();
+      if (fromPath) return fromPath;
+      return (tab.name || tab.formula || "molecule") + ".py";
+    },
+    async saveMolecule() {
+      const tab = this.tabs.find((t) => t.id === this.activeTabId);
+      if (!tab) return;
+      if (typeof window.showSaveFilePicker !== "function") {
+        // 浏览器不提供系统保存对话框时，退回手动输入保存路径
+        this.openSaveDialog();
+        return;
+      }
+      this.error = "";
+      this.status = "正在保存…";
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: this.saveSuggestedName(),
+          types: [
+            { description: "分子构建脚本", accept: { "text/plain": [".py"] } },
+          ],
+        });
+        const exported = await this.postJson("/api/export", {
+          session_id: tab.sessionId,
+          filename: handle.name,
+        });
+        const writable = await handle.createWritable();
+        await writable.write(exported.content);
+        await writable.close();
+        tab.dirty = false;
+        this.status = "已保存到：" + handle.name;
+        await this.reloadSavedTab(tab, {
+          filename: exported.filename || handle.name,
+          content: exported.content,
+        });
+      } catch (err) {
+        if (err && err.name === "AbortError") {
+          this.status = "已取消保存"; // 用户在文件管理器中点了取消
+          return;
+        }
+        this.error = "保存失败：" + (err && err.message ? err.message : err);
+        this.status = "";
+      }
+    },
     openSaveDialog() {
       const tab = this.tabs.find((t) => t.id === this.activeTabId);
       if (!tab) return;
@@ -787,34 +839,38 @@ const viewerApp = createApp({
         tab.dirty = false;
         this.status = "已保存到：" + data.path;
         this.showSaveDialog = false;
-        await this.reloadSavedTab(tab, data.path);
+        await this.reloadSavedTab(tab, { path: data.path });
       } catch (err) {
         this.error = "请求失败：" + err.message;
         this.status = "";
       }
     },
-    async reloadSavedTab(tab, path) {
+    async reloadSavedTab(tab, payload) {
       this.status = "正在重新加载…";
       try {
         const response = await fetch("/api/load", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path }),
+          body: JSON.stringify(payload),
         });
         const data = await response.json();
         if (!data.ok) {
           throw new Error(data.error || "重新加载失败");
         }
-        const descriptor = this.loadDescriptor({ path });
+        const descriptor = this.loadDescriptor(payload);
         tab.key = descriptor.key;
         tab.source = descriptor.displaySource || data.molecule.source || "";
         tab.name = data.molecule.name || "";
         tab.formula = data.molecule.formula || "";
         tab.molecule = data.molecule;
         tab.sessionId = data.session_id;
-        tab.originalPath = path;
         tab.dirty = false;
-        this.status = "已保存并重新加载：" + path;
+        // 文件系统访问接口只给出文件名，拿不到完整路径，因此只回填路径来源
+        if (typeof payload.path === "string") {
+          tab.originalPath = payload.path;
+        }
+        this.status =
+          "已保存并重新加载：" + (payload.path || payload.filename || "");
         this.$nextTick(() => this.fitView());
       } catch (err) {
         this.error = "重新加载失败：" + err.message;

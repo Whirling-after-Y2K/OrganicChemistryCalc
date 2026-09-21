@@ -1294,6 +1294,42 @@ def _minimize_route(route: SynthesisRoute, start: Sequence[oc.Molecule]) -> Synt
     return SynthesisRoute(target=route.target, steps=tuple(numbered))
 
 
+def _strategy_signature(route: SynthesisRoute) -> tuple[str, ...]:
+    """路线的思路签名：各步反应规则名的排序元组（集合口径）。
+
+    忽略步骤顺序、中间体与试剂：两条路线用到的反应原理集合相同，
+    即视为同一思路的变体（例如「先卤代再取代」与「先取代再卤代」）。
+    """
+    return tuple(sorted(step.rule_name for step in route.steps))
+
+
+def _filter_routes(
+    routes: list[SynthesisRoute],
+    *,
+    dedupe_strategy: bool,
+    optimal_only: bool,
+) -> list[SynthesisRoute]:
+    """按思路与步数精简路线列表（保持传入顺序，调用方需已按步数升序排好）。
+
+    - dedupe_strategy：同一思路签名只保留第一条，即该思路的最短代表；
+    - optimal_only：在去重之后只保留步数等于全局最小步数的路线。
+    """
+    if dedupe_strategy:
+        seen: set[tuple[str, ...]] = set()
+        deduped: list[SynthesisRoute] = []
+        for route in routes:
+            signature = _strategy_signature(route)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            deduped.append(route)
+        routes = deduped
+    if optimal_only and routes:
+        best_steps = min(route.step_count for route in routes)
+        routes = [route for route in routes if route.step_count == best_steps]
+    return routes
+
+
 # ------- 公共 API -------
 
 
@@ -1307,6 +1343,8 @@ def plan_synthesis(
     max_steps: int = DEFAULT_MAX_STEPS,
     beam_width: int = DEFAULT_BEAM_WIDTH,
     max_routes: int | None = DEFAULT_MAX_ROUTES,
+    dedupe_strategy: bool = False,
+    optimal_only: bool = False,
 ) -> list[SynthesisRoute]:
     """规划从起始反应物到目标产物的合成路线（默认最多 6 步）。
 
@@ -1314,7 +1352,11 @@ def plan_synthesis(
     - target：含碳有机目标产物；
     - reaction / conditions / category：按 oc_reactions.find_reactions 语义
       硬性筛选可用规则；筛选后无规则抛 ValueError；
+    - dedupe_strategy：按思路签名（各步反应规则名的集合）去重，每种思路
+      只保留最短代表；默认 False；
+    - optimal_only：只保留步数最少的路线；默认 False。
     - 返回路线按总步数升序、按结构去重，最多 max_routes 条；找不到返回空列表。
+      两个过滤均在排序之后、max_routes 截断之前生效，截断的是过滤后的结果。
     """
     if not isinstance(reactants, (list, tuple)):
         raise ValueError("reactants 必须是 Molecule 列表或元组")
@@ -1336,6 +1378,10 @@ def plan_synthesis(
         raise ValueError("beam_width 必须为正整数")
     if max_routes is not None and (not isinstance(max_routes, int) or max_routes < 1):
         raise ValueError("max_routes 必须为正整数或 None")
+    if not isinstance(dedupe_strategy, bool):
+        raise ValueError("dedupe_strategy 必须为布尔值")
+    if not isinstance(optimal_only, bool):
+        raise ValueError("optimal_only 必须为布尔值")
 
     if any(molecule == target for molecule in reactant_list):
         return [SynthesisRoute(target=target, steps=())]
@@ -1390,6 +1436,9 @@ def plan_synthesis(
                     routes.append(route)
 
     routes.sort(key=lambda route: (route.step_count, _route_key(route)))
+    routes = _filter_routes(
+        routes, dedupe_strategy=dedupe_strategy, optimal_only=optimal_only
+    )
     if max_routes is not None:
         routes = routes[:max_routes]
     return routes

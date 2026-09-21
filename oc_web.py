@@ -17,6 +17,8 @@
                           edit_molecule() 的 docstring
     POST /api/duplicate    复制会话分子为新的编辑会话：{"session_id"}，
                            返回新会话编号与副本载荷（深拷贝，编辑互不影响）
+    POST /api/export       导出会话分子的构建脚本文本：{"session_id", "filename"}，
+                            返回 {"filename", "content"}，供前端用系统保存对话框写文件
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -380,6 +382,22 @@ def _parse_positive_int(
     return result
 
 
+def _parse_bool(body: dict[str, Any], name: str, default: bool) -> bool:
+    """解析布尔开关：接受 JSON 布尔、0/1 与 "true"/"false"/"1"/"0" 字符串。"""
+    value = body.get(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1"}:
+            return True
+        if lowered in {"false", "0"}:
+            return False
+    raise ValueError(f"{name} 必须为布尔值")
+
+
 def _isomer_analysis_result(
     molecule: oc.Molecule,
     required_groups: list[str],
@@ -468,6 +486,8 @@ def _synthesis_analysis_result(
     category: str | None,
     max_steps: int,
     max_routes: int,
+    dedupe_strategy: bool,
+    optimal_only: bool,
 ) -> dict[str, Any]:
     """执行合成路线规划并序列化为前端载荷。"""
     routes = oc_synthesis.plan_synthesis(
@@ -478,6 +498,8 @@ def _synthesis_analysis_result(
         category=category,
         max_steps=max_steps,
         max_routes=max_routes,
+        dedupe_strategy=dedupe_strategy,
+        optimal_only=optimal_only,
     )
     serialized: list[dict[str, Any]] = []
     for route_index, route in enumerate(routes, 1):
@@ -527,6 +549,8 @@ def _parse_synthesis_request(
     str | None,
     int,
     int,
+    bool,
+    bool,
 ]:
     """解析并快照合成规划请求。"""
     raw_reactants = body.get("reactant_ids")
@@ -548,6 +572,8 @@ def _parse_synthesis_request(
         str(body.get("category") or "").strip() or None,
         _parse_positive_int(body, "max_steps", oc_synthesis.DEFAULT_MAX_STEPS, 8),
         _parse_positive_int(body, "max_routes", 5, 20),
+        _parse_bool(body, "dedupe_strategy", True),
+        _parse_bool(body, "optimal_only", True),
     )
 
 
@@ -800,6 +826,37 @@ def save_molecule() -> Any:
         return jsonify({"ok": False, "error": f"保存失败：{exc}"}), 400
 
 
+@app.post("/api/export")
+def export_molecule() -> Any:
+    """导出会话分子的构建脚本文本：{session_id, filename} -> {filename, content}。
+
+    文件名（不含目录）用作分子名，与 /api/save 的"重命名&保存"行为一致；
+    文本由前端写入用户在系统保存对话框里选定的文件。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
+    try:
+        session = _get_session(str(body.get("session_id") or ""))
+        filename = str(body.get("filename") or "").strip()
+        molecule_name = Path(filename).stem
+        if not molecule_name:
+            raise ValueError("文件名不能为空")
+        previous_name = session["molecule"].name
+        session["molecule"].name = molecule_name
+        try:
+            # 末尾补换行，与 oc_io.save_molecule 写出的文件保持一致
+            content = oc_io.molecule_to_code(session["molecule"]) + "\n"
+        except Exception:
+            session["molecule"].name = previous_name  # 校验失败时回滚改名
+            raise
+        return jsonify({"ok": True, "filename": filename, "content": content})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"导出失败：{exc}"}), 400
+
+
 @app.post("/api/synthesis")
 def plan_route() -> Any:
     """规划合成路线：{reactant_ids, target_id, ...}。"""
@@ -807,9 +864,17 @@ def plan_route() -> Any:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
-        reactants, target, reaction, conditions, category, max_steps, max_routes = (
-            _parse_synthesis_request(body)
-        )
+        (
+            reactants,
+            target,
+            reaction,
+            conditions,
+            category,
+            max_steps,
+            max_routes,
+            dedupe_strategy,
+            optimal_only,
+        ) = _parse_synthesis_request(body)
         return jsonify(
             _synthesis_analysis_result(
                 reactants,
@@ -819,6 +884,8 @@ def plan_route() -> Any:
                 category,
                 max_steps,
                 max_routes,
+                dedupe_strategy,
+                optimal_only,
             )
         )
     except ValueError as exc:
@@ -834,9 +901,17 @@ def start_synthesis_job() -> Any:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
-        reactants, target, reaction, conditions, category, max_steps, max_routes = (
-            _parse_synthesis_request(body)
-        )
+        (
+            reactants,
+            target,
+            reaction,
+            conditions,
+            category,
+            max_steps,
+            max_routes,
+            dedupe_strategy,
+            optimal_only,
+        ) = _parse_synthesis_request(body)
         job_id = _start_analysis_job(
             "synthesis",
             lambda: _synthesis_analysis_result(
@@ -847,6 +922,8 @@ def start_synthesis_job() -> Any:
                 category,
                 max_steps,
                 max_routes,
+                dedupe_strategy,
+                optimal_only,
             ),
         )
         return jsonify({"ok": True, "job_id": job_id, "poll_interval_ms": ANALYSIS_POLL_INTERVAL_MS}) 
