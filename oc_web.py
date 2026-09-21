@@ -754,6 +754,8 @@ def edit_molecule() -> Any:
         才替换 session["molecule"]，任一步失败都会话分子保持原样。
         del_atom 删除 π 体系成员时：先移除该原子所在的全部 π 体系，再删除这个
         原子本身；π 体系的其余成员原子保留在分子中，不会被连带删除。
+        add_bond 新建键不限制 π 体系：π 体系成员与体系外原子可以直接成键
+        （同一 π 体系成员之间仍只允许单键，由 organic_chemistry.add_bond 把关）。
         set_bond_order / del_bond 只要有一端原子在 π 体系内就拒绝执行。
     """
     body = request.get_json(silent=True)

@@ -2,7 +2,9 @@
    编辑操作统一走 /api/edit：add_atom / add_atom_bonded / add_benzene / add_nitro /
    add_bond / set_bond_order / del_atom / del_bond。
    苯环、硝基需先在"选择"模式点选锚点原子；删除 π 体系成员原子时后端会移除整个
-   π 体系，但只删除被点击的那个原子，其余成员保留。 */
+   π 体系，但只删除被点击的那个原子，其余成员保留。
+   加键模式：新建键走 add_bond，π 体系成员与体系外原子可以直接成键；已有键的
+   键级调整走 set_bond_order，涉及 π 体系时后端会拒绝。 */
 "use strict";
 
 const { createApp } = Vue;
@@ -787,14 +789,16 @@ const viewerApp = createApp({
         this.status = "该键已是此键级";
         return;
       }
+      // 新键走 add_bond：π 体系成员与体系外原子可以直接成键；
+      // 已有键的键级调整仍走 set_bond_order（涉及 π 体系时后端会拒绝）。
       const ok = await this.editApi({
-        op: "set_bond_order",
+        op: existing ? "set_bond_order" : "add_bond",
         atom1: atom1,
         atom2: atom2,
         order: this.bondOrder,
       });
       this.pendingAtom = null;
-      if (ok) this.status = "已设置键级";
+      if (ok) this.status = existing ? "已设置键级" : "已添加键";
     },
     async deleteAtom(atomId) {
       const wasInPi = this.molecule.pi_systems.some((pi) =>
