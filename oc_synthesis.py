@@ -1350,6 +1350,7 @@ def plan_synthesis(
 
     - reactants：含碳有机起始反应物（小分子试剂由系统自动提供，无需输入）；
     - target：含碳有机目标产物；
+    - reactants 与 target 均须为单一连通分量的分子，否则抛 ValueError；
     - reaction / conditions / category：按 oc_reactions.find_reactions 语义
       硬性筛选可用规则；筛选后无规则抛 ValueError；
     - dedupe_strategy：按思路签名（各步反应规则名的集合）去重，每种思路
@@ -1368,10 +1369,12 @@ def plan_synthesis(
             raise ValueError("反应物必须是 organic_chemistry.Molecule 实例")
         if not _has_carbon(molecule):
             raise ValueError("起始反应物必须为含碳有机分子（小分子试剂由系统自动提供）")
+        oc.ensure_single_component(molecule, "起始反应物")
     if not isinstance(target, oc.Molecule):
         raise ValueError("target 必须是 organic_chemistry.Molecule 实例")
     if not _has_carbon(target):
         raise ValueError("目标产物必须为含碳有机分子")
+    oc.ensure_single_component(target, "目标产物")
     if not isinstance(max_steps, int) or max_steps < 1:
         raise ValueError("max_steps 必须为正整数")
     if not isinstance(beam_width, int) or beam_width < 1:

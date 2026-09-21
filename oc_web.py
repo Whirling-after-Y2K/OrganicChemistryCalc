@@ -485,6 +485,7 @@ def _parse_isomer_request(
     """解析并快照异构体分析请求，避免后台任务受到后续编辑影响。"""
     session = _get_session(str(body.get("session_id") or ""))
     molecule = oc.copy_molecule(session["molecule"])
+    oc.ensure_single_component(molecule)
 
     raw_groups = body.get("required_groups") or []
     if isinstance(raw_groups, str):
@@ -599,7 +600,10 @@ def _parse_synthesis_request(
     ]
     if not reactants:
         raise ValueError("请至少选择一个起始反应物")
+    for reactant in reactants:
+        oc.ensure_single_component(reactant, "起始反应物")
     target = oc.copy_molecule(_get_session(str(body.get("target_id") or ""))["molecule"])
+    oc.ensure_single_component(target, "目标产物")
     return (
         reactants,
         target,
@@ -853,6 +857,7 @@ def save_molecule() -> Any:
         molecule_name = Path(path).stem
         if not molecule_name:
             raise ValueError("保存文件名不能为空")
+        oc.ensure_single_component(session["molecule"])
         session["molecule"].name = molecule_name
         oc_io.save_molecule(session["molecule"], path)
         return jsonify({"ok": True, "path": os.path.abspath(path)})
@@ -878,6 +883,7 @@ def export_molecule() -> Any:
         molecule_name = Path(filename).stem
         if not molecule_name:
             raise ValueError("文件名不能为空")
+        oc.ensure_single_component(session["molecule"])
         previous_name = session["molecule"].name
         session["molecule"].name = molecule_name
         try:

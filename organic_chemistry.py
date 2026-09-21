@@ -772,6 +772,22 @@ def connect(target_atom_list: list[Atom], is_cyclization: bool = False) -> None:
         add_bond(atom1, atom2)
 
 
+def ensure_single_component(molecule: Molecule, role: str = "分子") -> None:
+    """确认 molecule 只有一个连通分量，否则抛 ValueError。
+
+    保存、同分异构体分析与合成路线分析都以"一个分子"为前提：出现多个
+    互不成键的片段时，分子式、基团与合成分析都没有意义，直接拒绝。
+    """
+    count = molecule.component_count
+    if count == 1:
+        return
+    if count == 0:
+        raise ValueError(f"{role}不能为空（没有任何原子）")
+    raise ValueError(
+        f"{role}必须只有一个连通分量，当前有 {count} 个互不成键的片段"
+    )
+
+
 # ------- 结构指纹（Weisfeiler-Lehman） -------
 
 def _infer_pi_dbe(atoms: list[Atom]) -> int:

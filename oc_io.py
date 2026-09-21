@@ -84,7 +84,11 @@ def molecule_from_code(code: str) -> oc.Molecule:
 
 
 def save_molecule(molecule: oc.Molecule, path: str | os.PathLike[str]) -> None:
-    """将分子保存为 UTF-8 构建脚本文件（保存前校验结构，非法结构抛 ValueError）。"""
+    """将分子保存为 UTF-8 构建脚本文件（保存前校验结构，非法结构抛 ValueError）。
+
+    只接受单一连通分量的分子：存在互不成键的片段时抛 ValueError。
+    """
+    oc.ensure_single_component(molecule)
     code = molecule_to_code(molecule)
     with open(path, "w", encoding="utf-8") as file:
         file.write(code)

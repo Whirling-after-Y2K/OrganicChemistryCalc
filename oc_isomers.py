@@ -377,6 +377,7 @@ def find_isomers(
     - equivalent_hydrogens 指定期望的等位氢模式（按公约数约分后比较），
       含非正整数抛 ValueError；
     - 重原子数超过 MAX_HEAVY_ATOMS 抛 ValueError；
+    - 分子有多个连通分量（互不成键的片段）时抛 ValueError；
     - 无法用隐氢模型表示的分子（如 H2、HF）退化为仅返回输入本身；
     - 可含苯环的分子式只枚举含苯环/硝基的结构族（高中口径）；
     - allow_extra_rings 控制是否允许片段外部额外成环：默认在可含苯环的
@@ -386,6 +387,7 @@ def find_isomers(
     resolved = _resolve_required_groups(required_groups)
     h_pattern = _resolve_equivalent_hydrogens(equivalent_hydrogens)
     molecule.validate()
+    oc.ensure_single_component(molecule)
     target = dict(molecule.formula)
     heavy = _heavy_counts(molecule)
     total_heavy = sum(heavy.values())

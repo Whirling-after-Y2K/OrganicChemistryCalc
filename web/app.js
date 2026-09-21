@@ -822,9 +822,20 @@ const viewerApp = createApp({
       if (fromPath) return fromPath;
       return (tab.name || tab.formula || "molecule") + ".py";
     },
+    rejectDisconnectedSave(tab) {
+      const count = tab?.molecule?.component_count;
+      if (count === 1) return false;
+      this.error = count === 0
+        ? "空分子不能保存"
+        : `分子包含 ${count} 个连通分量，仅支持单一连通分量保存`;
+      this.status = "";
+      return true;
+    },
     async saveMolecule() {
       const tab = this.tabs.find((t) => t.id === this.activeTabId);
       if (!tab) return;
+      if (this.rejectDisconnectedSave(tab)) return;
+      this.error = "";
       if (typeof window.showSaveFilePicker !== "function") {
         // 浏览器不提供系统保存对话框时，退回手动输入保存路径
         this.openSaveDialog();
@@ -872,6 +883,7 @@ const viewerApp = createApp({
     async confirmSave() {
       const tab = this.tabs.find((t) => t.id === this.activeTabId);
       if (!tab) return;
+      if (this.rejectDisconnectedSave(tab)) return;
       const path = this.savePath.trim();
       if (!path) {
         this.error = "请输入保存路径";
