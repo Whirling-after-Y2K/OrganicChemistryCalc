@@ -220,6 +220,61 @@ const viewerApp = createApp({
         this.status = "";
       }
     },
+    // ---- 导入到当前标签页 ----
+    pickImportFile() {
+      this.$refs.importInput.click();
+    },
+    onImportFileChosen(event) {
+      const file = event.target.files && event.target.files[0];
+      event.target.value = "";
+      if (file) this.importFile(file);
+    },
+    async importFile(file) {
+      this.error = "";
+      this.status = "正在读取 " + file.name + " …";
+      let content = "";
+      try {
+        content = await file.text();
+      } catch (err) {
+        this.error = "读取文件失败：" + err.message;
+        this.status = "";
+        return;
+      }
+      const tab = this.activeTab;
+      if (!tab || !tab.sessionId) {
+        // 没有打开的分子时，导入等同于打开：新建一个标签页
+        await this.requestLoad({ filename: file.name, content });
+        return;
+      }
+      this.status = "正在导入…";
+      try {
+        const response = await fetch("/api/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: tab.sessionId,
+            content,
+          }),
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          this.error = data.error || "导入失败";
+          this.status = "";
+          return;
+        }
+        tab.molecule = data.molecule;
+        tab.formula = data.molecule.formula || tab.formula;
+        tab.dirty = true;
+        // 原子集合变了，旧的锚点选择失效
+        this.pendingAtom = null;
+        this.status = "已导入 " + file.name + " 到当前标签页";
+        this.render();
+        this.$nextTick(() => this.fitView());
+      } catch (err) {
+        this.error = "请求失败：" + err.message;
+        this.status = "";
+      }
+    },
     async openNewMolecule() {
       this.error = "";
       const key = "new:" + performance.now() + ":" + Math.random().toString(36).slice(2);

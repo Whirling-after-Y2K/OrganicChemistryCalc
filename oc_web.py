@@ -16,7 +16,9 @@
                           成功后返回最新载荷；π 体系编辑约定见
                           edit_molecule() 的 docstring
     POST /api/duplicate    复制会话分子为新的编辑会话：{"session_id"}，
-                           返回新会话编号与副本载荷（深拷贝，编辑互不影响）
+                          返回新会话编号与副本载荷（深拷贝，编辑互不影响）
+    POST /api/import       把外部分子并入当前会话分子：{"session_id"} 加
+                           {"content"} 或 {"path"}
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
@@ -283,6 +285,40 @@ def duplicate_molecule() -> Any:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"ok": False, "error": f"复制分子失败：{exc}"}), 400
+
+
+@app.post("/api/import")
+def import_into_molecule() -> Any:
+    """把外部分子并入当前会话分子：{"session_id"} 加 {"content"} 或 {"path"}。
+
+    导入的分子作为独立片段追加进当前分子（oc.merge_molecules 生成新容器），
+    不与现有原子成键；当前分子的名称保留，成功后返回最新载荷。
+    无打开的分子时前端改为走 /api/load 新建标签页。
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
+    try:
+        session = _get_session(str(body.get("session_id") or ""))
+        source = str(session.get("source") or "")
+        if "path" in body:
+            imported: oc.Molecule = oc_io.load_molecule(str(body["path"]))
+        elif "content" in body:
+            imported = oc_io.molecule_from_code(str(body["content"]))
+        else:
+            raise ValueError("请求需包含 path 或 content")
+        current: oc.Molecule = session["molecule"]
+        merged = oc.merge_molecules([current, imported])
+        merged.name = current.name
+        session["molecule"] = merged
+        payload = oc_render.molecule_to_payload(merged, source)
+        return jsonify(
+            {"ok": True, "session_id": body["session_id"], "molecule": payload} # type: ignore
+        )
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"导入失败：{exc}"}), 400
 
 
 def _atom_at(molecule: oc.Molecule, atom_id: object) -> oc.Atom:
