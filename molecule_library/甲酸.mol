@@ -1,0 +1,18 @@
+# 分子构建脚本（由 oc_io 生成）
+# 警告：加载本文件会执行其中的代码，请勿运行来源不明的文件。
+import organic_chemistry as oc
+
+molecule = oc.Molecule(name='甲酸')
+
+a0 = oc.Atom('c', molecule)
+a1 = oc.Atom('o', molecule)
+a2 = oc.Atom('o', molecule)
+
+oc.add_bond(a0, a1, order=2)
+oc.add_bond(a0, a2)
+
+
+molecule.validate()
+
+if __name__ == "__main__":
+    print(molecule)

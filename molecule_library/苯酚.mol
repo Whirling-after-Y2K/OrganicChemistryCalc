@@ -1,0 +1,28 @@
+# 分子构建脚本（由 oc_io 生成）
+# 警告：加载本文件会执行其中的代码，请勿运行来源不明的文件。
+import organic_chemistry as oc
+
+molecule = oc.Molecule(name='苯酚')
+
+a0 = oc.Atom('c', molecule)
+a1 = oc.Atom('c', molecule)
+a2 = oc.Atom('c', molecule)
+a3 = oc.Atom('c', molecule)
+a4 = oc.Atom('c', molecule)
+a5 = oc.Atom('c', molecule)
+a6 = oc.Atom('o', molecule)
+
+oc.add_bond(a0, a1)
+oc.add_bond(a1, a2)
+oc.add_bond(a2, a3)
+oc.add_bond(a3, a4)
+oc.add_bond(a4, a5)
+oc.add_bond(a5, a0)
+oc.add_bond(a1, a6)
+
+oc.add_pi_system([a0, a1, a2, a3, a4, a5], dbe=3)
+
+molecule.validate()
+
+if __name__ == "__main__":
+    print(molecule)
