@@ -19,7 +19,7 @@
   不同烯烃；苯环取代结合定位效应只取有利位点（邻对位/间位）。
 
 输入约定：reactants 为 Molecule 列表，顺序与规则的 input_index 对应，例如
-酯化 [羧酸, 醇]、加成类 [有机物, 试剂]、水解 [有机物, 水]、氧化 [有机物, O2]。
+酯化 [羧酸, 醇/苯酚]、加成类 [有机物, 试剂]、水解 [有机物, 水]、氧化 [有机物, O2]。
 """
 
 from __future__ import annotations
@@ -1080,6 +1080,27 @@ def _build_rules() -> tuple[ReactionRule, ...]:
             apply,
         )
 
+    def rule_phenol_esterification() -> ReactionRule:
+        acid_p, acid_c, acid_oh = _pattern_carboxyl()
+        phenol_p, _ring, phenol_o = _pattern_phenol()
+
+        def apply(ctx: ReactionContext) -> list[oc.Molecule]:
+            acid_carbon = ctx.atom(0, acid_c)
+            acid_o = ctx.atom(0, acid_oh)
+            phenol_oxygen = ctx.atom(1, phenol_o)
+            oc.break_bond(acid_carbon, acid_o)  # 羧基脱 OH
+            oc.add_bond(acid_carbon, phenol_oxygen)  # 成酯键
+            return []
+
+        return ReactionRule(
+            "苯酚酯化", "酯化", "浓硫酸/加热",
+            [
+                ReactantSpec(0, pattern=acid_p),
+                ReactantSpec(1, pattern=phenol_p),
+            ],
+            apply,
+        )
+
     # ---------- 目录 ----------
 
     rules.append(rule_alkene_h2())
@@ -1104,6 +1125,7 @@ def _build_rules() -> tuple[ReactionRule, ...]:
     rules.append(rule_haloalkane_hydrolysis())
     rules.append(rule_ester_hydrolysis())
     rules.append(rule_esterification())
+    rules.append(rule_phenol_esterification())
     return tuple(rules)
 
 

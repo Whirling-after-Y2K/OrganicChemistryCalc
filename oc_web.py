@@ -24,6 +24,7 @@
     POST /api/isomers/jobs 后台枚举同分异构体，返回 {"job_id": ...}
     POST /api/synthesis/jobs 后台规划合成路线，返回 {"job_id": ...}
     GET  /api/analysis-jobs/<job_id> 查询后台分析任务状态
+    POST /api/analysis-jobs/<job_id>/cancel 请求取消后台分析任务
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ app.json.ensure_ascii = False  # type: ignore # 保留中文，便于调试与�
 
 # 编辑会话：session_id -> {"molecule": Molecule, "source": str}（仅存内存）
 _SESSIONS: dict[str, dict[str, Any]] = {}
+MAX_SESSION_ENTRIES: int = 256
 
 # 已解析分子的载荷缓存：路径按 mtime/size 失效，内容按 SHA-256 失效。
 # 会话始终使用深拷贝，避免编辑操作污染缓存。
@@ -69,6 +71,8 @@ MAX_ISOMER_RESULTS: int = 500
 _ANALYSIS_JOBS: dict[str, dict[str, Any]] = {}
 MAX_ANALYSIS_JOBS: int = 64
 ANALYSIS_POLL_INTERVAL_MS: int = 250
+# 终止状态：不再变化，可被清理、可直接结算 elapsed_ms
+_FINISHED_JOB_STATUSES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 
 @app.get("/")
@@ -114,14 +118,27 @@ def _cache_loaded_molecule(
     _LOAD_CACHE[key] = {"molecule": molecule, "payload": payload}
 
 
+def _register_session(session_id: str, molecule: oc.Molecule, source: str) -> None:
+    """登记编辑会话；先进先出上限防止长期运行后 _SESSIONS 无限增长。
+
+     上限远大于前端同时打开的标签页数量，正常使用不会触发淘汰；一旦淘汰，
+     被淘汰会话上的后续编辑会报“会话不存在，请重新打开分子”。
+    """
+    if session_id not in _SESSIONS and len(_SESSIONS) >= MAX_SESSION_ENTRIES:
+        del _SESSIONS[next(iter(_SESSIONS))]
+    _SESSIONS[session_id] = {"molecule": molecule, "source": source}
+
+
 @app.post("/api/load")
 def load_molecule() -> Any:
     """加载分子：接受 {"path": ...} 或 {"filename": ..., "content": ...}。"""
+    # 计时从方法入口开始：请求排队、等待 GIL 的时间也计入 total_ms，
+    # 否则后台分析任务抢占 CPU 时后端会报出很小的 total_ms。
+    request_start = time.perf_counter()
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
-        request_start = time.perf_counter()
         parse_ms: float = 0.0
         render_ms: float = 0.0
 
@@ -157,10 +174,7 @@ def load_molecule() -> Any:
         copy_start = time.perf_counter()
         session_molecule = oc.copy_molecule(cached_molecule)
         copy_ms = round((time.perf_counter() - copy_start) * 1000, 3)
-        _SESSIONS[session_id] = {
-            "molecule": session_molecule,
-            "source": source,
-        }
+        _register_session(session_id, session_molecule, source)
         total_ms = round((time.perf_counter() - request_start) * 1000, 3)
         timing: dict[str, Any] = {
             "cache_hit": cached is not None,
@@ -171,11 +185,12 @@ def load_molecule() -> Any:
         }
         if total_ms > SLOW_LOAD_WARNING_MS:
             app.logger.warning(
-                "分子加载耗时 %.3f ms 超过 %.3f ms：source=%s, timing=%s",
+                "分子加载耗时 %.3f ms 超过 %.3f ms：source=%s, timing=%s, 后台任务=%d",
                 total_ms,
                 SLOW_LOAD_WARNING_MS,
                 source,
                 timing,
+                _active_analysis_job_count(),
             )
         return jsonify(
             {
@@ -240,10 +255,7 @@ def create_template_molecule(template: str) -> Any:
         source, create_molecule = item
         molecule = create_molecule()
         session_id = uuid.uuid4().hex
-        _SESSIONS[session_id] = {
-            "molecule": molecule,
-            "source": source,
-        }
+        _register_session(session_id, molecule, source)
         return jsonify(
             {
                 "ok": True,
@@ -272,10 +284,7 @@ def duplicate_molecule() -> Any:
         source = str(session.get("source") or "")
         molecule = oc.copy_molecule(session["molecule"])
         session_id = uuid.uuid4().hex
-        _SESSIONS[session_id] = {
-            "molecule": molecule,
-            "source": source,
-        }
+        _register_session(session_id, molecule, source)
         return jsonify(
             {
                 "ok": True,
@@ -297,25 +306,55 @@ def import_into_molecule() -> Any:
     不与现有原子成键；当前分子的名称保留，成功后返回最新载荷。
     无打开的分子时前端改为走 /api/load 新建标签页。
     """
+    # 计时从方法入口开始：请求排队、等待 GIL 的时间也计入 total_ms。
+    request_start = time.perf_counter()
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
     try:
         session = _get_session(str(body.get("session_id") or ""))
         source = str(session.get("source") or "")
+        parse_ms: float = 0.0
+        parse_start = time.perf_counter()
         if "path" in body:
             imported: oc.Molecule = oc_io.load_molecule(str(body["path"]))
         elif "content" in body:
             imported = oc_io.molecule_from_code(str(body["content"]))
         else:
             raise ValueError("请求需包含 path 或 content")
+        parse_ms = round((time.perf_counter() - parse_start) * 1000, 3)
         current: oc.Molecule = session["molecule"]
+        merge_start = time.perf_counter()
         merged = oc.merge_molecules([current, imported])
         merged.name = current.name
         session["molecule"] = merged
+        merge_ms = round((time.perf_counter() - merge_start) * 1000, 3)
+        render_start = time.perf_counter()
         payload = oc_render.molecule_to_payload(merged, source)
+        render_ms = round((time.perf_counter() - render_start) * 1000, 3)
+        total_ms = round((time.perf_counter() - request_start) * 1000, 3)
+        timing: dict[str, Any] = {
+            "parse_ms": parse_ms,
+            "merge_ms": merge_ms,
+            "render_ms": render_ms,
+            "total_ms": total_ms,
+        }
+        if total_ms > SLOW_LOAD_WARNING_MS:
+            app.logger.warning(
+                "分子导入耗时 %.3f ms 超过 %.3f ms：source=%s, timing=%s, 后台任务=%d",
+                total_ms,
+                SLOW_LOAD_WARNING_MS,
+                source,
+                timing,
+                _active_analysis_job_count(),
+            )
         return jsonify(
-            {"ok": True, "session_id": body["session_id"], "molecule": payload} # type: ignore
+            {
+                "ok": True,
+                "session_id": body["session_id"], # type: ignore
+                "molecule": payload,
+                "timing": timing,
+            }
         )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
@@ -374,7 +413,7 @@ def _formula_text(formula: dict[str, int]) -> str:
 def _register_molecule(molecule: oc.Molecule, source: str) -> str:
     """把分析结果注册成普通编辑会话，供前端直接打开。"""
     session_id = uuid.uuid4().hex
-    _SESSIONS[session_id] = {"molecule": molecule, "source": source}
+    _register_session(session_id, molecule, source)
     return session_id
 
 
@@ -622,10 +661,19 @@ def _cleanup_analysis_jobs() -> None:
     finished = [
         job_id
         for job_id, job in _ANALYSIS_JOBS.items()
-        if job["status"] in {"done", "failed"}
+        if job["status"] in _FINISHED_JOB_STATUSES
     ]
     while len(_ANALYSIS_JOBS) > MAX_ANALYSIS_JOBS and finished:
         del _ANALYSIS_JOBS[finished.pop(0)]
+
+
+def _active_analysis_job_count() -> int:
+    """仍在运行的后台分析任务数。
+
+     后台任务是纯 CPU 密集的 Python 代码，会与 Flask 请求线程争抢 GIL；
+     慢加载日志带上这个数字，便于判断卡顿是否由后台任务抢占导致。
+    """
+    return sum(1 for job in _ANALYSIS_JOBS.values() if job["status"] == "running")
 
 
 def _start_analysis_job(
@@ -642,13 +690,20 @@ def _start_analysis_job(
         "elapsed_ms": 0.0,
         "result": None,
         "error": "",
+        "cancel_requested": False,
     }
     _ANALYSIS_JOBS[job_id] = job
 
     def run_job() -> None:
         started = time.perf_counter()
         try:
+            if job["cancel_requested"]:
+                job["status"] = "cancelled"
+                return
             result = work()
+            if job["cancel_requested"]:
+                job["status"] = "cancelled"
+                return
             job["result"] = result
             job["status"] = "done"
         except ValueError as exc:
@@ -675,7 +730,7 @@ def _analysis_job_response(job_id: str) -> dict[str, Any]:
         "status": job["status"],
         "elapsed_ms": (
             job["elapsed_ms"]
-            if job["status"] in {"done", "failed"}
+            if job["status"] in _FINISHED_JOB_STATUSES
             else round((time.time() - job["started_at"]) * 1000, 3)
         ),
     }
@@ -684,6 +739,29 @@ def _analysis_job_response(job_id: str) -> dict[str, Any]:
     elif job["status"] == "failed":
         response["error"] = job["error"]
     return response
+
+
+@app.post("/api/analysis-jobs/<job_id>/cancel")
+def cancel_analysis_job(job_id: str) -> Any:
+    """请求取消后台分析任务。
+
+     正在执行的纯 Python 搜索无法被抢占，取消只保证：任务不再继续投入新的
+     工作、结果不会被采用、前端停止轮询。前端在页面卸载时调用，避免刷新或
+     关掉标签页后仍有后台线程长时间占用 CPU（与请求线程争抢 GIL）。
+    """
+    job = _ANALYSIS_JOBS.get(job_id)
+    if job is None:
+        return jsonify({"ok": False, "error": "分析任务不存在或已过期"}), 404
+    if job["status"] == "running":
+        job["cancel_requested"] = True
+    return jsonify(
+        {
+            "ok": True,
+            "job_id": job_id,
+            "status": job["status"],
+            "cancel_requested": bool(job["cancel_requested"]),
+        }
+    )
 
 
 @app.post("/api/isomers")
@@ -758,6 +836,8 @@ def edit_molecule() -> Any:
         （同一 π 体系成员之间仍只允许单键，由 organic_chemistry.add_bond 把关）。
         set_bond_order / del_bond 只要有一端原子在 π 体系内就拒绝执行。
     """
+    # 计时从方法入口开始：请求排队、等待 GIL 的时间也计入 total_ms。
+    request_start = time.perf_counter()
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "请求需为 JSON 对象"}), 400
@@ -765,6 +845,7 @@ def edit_molecule() -> Any:
         session = _get_session(str(body.get("session_id") or ""))
         molecule = session["molecule"]
         op = str(body.get("op") or "")
+        edit_start = time.perf_counter()
         if op == "add_atom":
             element = str(body.get("element") or "")
             if element not in oc.CHEMISTRY_BOND_DICT:
@@ -835,10 +916,35 @@ def edit_molecule() -> Any:
             oc.break_bond(atom1, atom2)
         else:
             raise ValueError("未知编辑操作")
+        edit_ms = round((time.perf_counter() - edit_start) * 1000, 3)
+        render_start = time.perf_counter()
         payload = oc_render.molecule_to_payload(
             session["molecule"], session["source"]
         )
-        return jsonify({"ok": True, "session_id": body["session_id"], "molecule": payload}) # type: ignore
+        render_ms = round((time.perf_counter() - render_start) * 1000, 3)
+        total_ms = round((time.perf_counter() - request_start) * 1000, 3)
+        timing: dict[str, Any] = {
+            "edit_ms": edit_ms,
+            "render_ms": render_ms,
+            "total_ms": total_ms,
+        }
+        if total_ms > SLOW_LOAD_WARNING_MS:
+            app.logger.warning(
+                "分子编辑耗时 %.3f ms 超过 %.3f ms：op=%s, timing=%s, 后台任务=%d",
+                total_ms,
+                SLOW_LOAD_WARNING_MS,
+                op,
+                timing,
+                _active_analysis_job_count(),
+            )
+        return jsonify(
+            {
+                "ok": True,
+                "session_id": body["session_id"], # type: ignore
+                "molecule": payload,
+                "timing": timing,
+            }
+        )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:

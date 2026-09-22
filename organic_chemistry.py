@@ -71,10 +71,12 @@ class Molecule:
         self.bonds: list[Bond] = []
         self.pi_systems: list[PiSystem] = []
         self._snapshot: _FingerprintSnapshot | None = None  # update() 后生效的指纹快照
+        self._hydrogen_groups: list[int] | None = None  # 等位氢分组缓存
 
     def _invalidate(self) -> None:
-        """编辑后失效指纹快照；下次读取 feature / == 判等时自动重算。"""
+        """编辑后失效指纹快照与等位氢分组缓存；下次读取时自动重算。"""
         self._snapshot = None
+        self._hydrogen_groups = None
 
     # ---- 派生数据（全部现算，不存储） ----
 
@@ -186,8 +188,14 @@ class Molecule:
         避免把不同分子的氢误并为一组。结果按个数降序排列（同个数按
         分子内原子首次出现顺序），例如乙醇 → [3, 2, 1]。
         计算前先校验结构（validate），无效结构抛 ValueError。
+
+         结果按分子结构惰性缓存：任何结构编辑都会失效缓存，因此同一分子
+         连续读取（例如载荷生成、多个分析入口）不会重复做轨道计算。
+         返回防御性拷贝，外部修改返回值不影响缓存。
         """
         self.validate()
+        if self._hydrogen_groups is not None:
+            return list(self._hydrogen_groups)
         if not self.atoms:
             return []
         colors: dict[Atom, AtomLabel]
@@ -214,7 +222,9 @@ class Molecule:
             counts[gid] = counts.get(gid, 0) + total
             first_index.setdefault(gid, index)
         ordered = sorted(counts, key=lambda gid: (-counts[gid], first_index[gid]))
-        return [counts[gid] for gid in ordered]
+        result = [counts[gid] for gid in ordered]
+        self._hydrogen_groups = result
+        return list(result)
 
     # ---- 内置方法 ----
 
@@ -1053,6 +1063,9 @@ def _are_isomorphic(
     adj2 = _build_adjacency(m2)
     atom_pi1 = _pi_index(m1)
     atom_pi2 = _pi_index(m2)
+    # 顶点标签在本次判断里恒定，预先算好；回溯内部会反复调用，避免重复构造
+    label1: dict[Atom, Label] = {atom: _initial_label(atom) for atom in m1.atoms}
+    label2: dict[Atom, Label] = {atom: _initial_label(atom) for atom in m2.atoms}
 
     mapping: dict[Atom, Atom] = {}
     matched2: set[Atom] = set()
@@ -1061,7 +1074,7 @@ def _are_isomorphic(
 
     if fixed is not None:
         for v1, w in fixed.items():
-            if _initial_label(v1) != _initial_label(w) or colors1[v1] != colors2[w]:
+            if label1[v1] != label2[w] or colors1[v1] != colors2[w]:
                 return False
             p1 = atom_pi1.get(v1)
             p2 = atom_pi2.get(w)
@@ -1084,7 +1097,7 @@ def _are_isomorphic(
 
     def feasible(v1: Atom, w: Atom) -> bool:
         """候选 w 是否可与 v1 配对（基于已匹配映射）。"""
-        if _initial_label(v1) != _initial_label(w):
+        if label1[v1] != label2[w]:
             return False
         if colors1[v1] != colors2[w]:
             return False
@@ -1101,21 +1114,38 @@ def _are_isomorphic(
                     return False
             elif p2[0] in sys_map_rev:
                 return False
-        for u1, u2 in mapping.items():
-            if adj1[v1].get(u1, ()) != adj2[w].get(u2, ()):
+        # 只需核对 v1 到已匹配顶点的邻接：键级多重集逐一保住 m1 的每条边，
+        # 再由入口的键数相等判定收口（双射下像边互不相同且数量相同，
+        # 因此像边就是 m2 的全部边），无需再遍历未与 v1 相邻的已匹配顶点。
+        for u1, orders1 in adj1[v1].items():
+            u2 = mapping.get(u1)
+            if u2 is not None and orders1 != adj2[w].get(u2, ()):
                 return False
         return True
 
     def backtrack() -> bool:
         if len(mapping) == len(m1.atoms):
             return True
-        # fail-first：每次选候选集最小的未匹配顶点
         best_v1: Atom | None = None
         best_candidates: list[Atom] = []
         for v1 in m1.atoms:
             if v1 in mapping:
                 continue
-            candidates = [w for w in m2.atoms if w not in matched2 and feasible(v1, w)]
+            anchor = next((u1 for u1 in adj1[v1] if u1 in mapping), None)
+            if anchor is None:
+                # 与任何已匹配顶点都不相邻：属于尚未开始的连通分量，
+                # 候选来自全图；这种顶点只取第一个，不再参与 fail-first 比较。
+                if best_v1 is not None:
+                    continue
+                candidates = [
+                    w for w in m2.atoms if w not in matched2 and feasible(v1, w)
+                ]
+            else:
+                # 此时候选只需来自该锚点像的邻接表，而不是全图扫描
+                image = mapping[anchor]
+                candidates = [
+                    w for w in adj2[image] if w not in matched2 and feasible(v1, w)
+                ]
             if not candidates:
                 return False
             if best_v1 is None or len(candidates) < len(best_candidates):
@@ -1158,6 +1188,8 @@ def _automorphism_orbits(
     回溯确认”，因此 WL 标签可能误并的不等价位置会被正确拆开。
     前置条件：结构已通过 validate()，colors 与之匹配。
     """
+    # 同一分量、同一颜色内部按轨道代表元比对；WL 标签可能误并的不等价
+    # 位置由精确的同构确认拆开。
     comp: dict[Atom, int] = {}
     next_comp = 0
     for atom in molecule.atoms:
@@ -1192,13 +1224,22 @@ def _automorphism_orbits(
         groups.setdefault((comp[atom], colors[atom]), []).append(atom)
 
     for group in groups.values():
+        if len(group) < 2:
+            continue
+        # 轨道代表元法：每个原子只需与已确立的各轨道代表元比对，命中即并入
+        # 该轨道。自同构在复合下成群，故"可被自同构映对"是传递关系：
+        # 原子与轨道内任一原子等价，就必然与代表元等价，结果与两两比对一致，
+        # 但同构判断次数从 O(k^2) 降到 O(k * 轨道数)。高度对称的分子
+        # （长链、多甲基、大环）原先会把绝大部分时间耗在重复确认上。
+        reps: list[Atom] = []
         for i in range(len(group)):
-            for j in range(i + 1, len(group)):
-                a, b = group[i], group[j]
-                if find(a) is find(b):
-                    continue
-                if _are_isomorphic(molecule, molecule, colors, colors, fixed={a: b}):
-                    union(a, b)
+            atom = group[i]
+            for rep in reps:
+                if _are_isomorphic(molecule, molecule, colors, colors, fixed={atom: rep}):
+                    union(atom, rep)
+                    break
+            else:
+                reps.append(atom)
 
     orbit_id: dict[Atom, int] = {}
     for atom in molecule.atoms:

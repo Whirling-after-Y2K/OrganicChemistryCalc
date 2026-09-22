@@ -89,6 +89,10 @@ const viewerApp = createApp({
       error: "",
       status: "就绪",
       loadRequests: {},
+      analysisJobs: [],
+      dialogStartedAt: 0,
+      fileDialogMs: null,
+      fileReadMs: null,
       groupOptions: [],
       isomerGroups: [],
       isomerHydrogenPattern: "",
@@ -149,6 +153,9 @@ const viewerApp = createApp({
     this.initCanvasEvents();
     this.updateCursor();
     window.addEventListener("resize", () => this.resizeCanvas());
+    // 刷新或关闭标签页时取消仍在跑的后台分析任务：纯 CPU 密集的搜索会
+    // 持续与后续请求争抢 GIL，让“打开分子”之类的操作看起来卡住。
+    window.addEventListener("pagehide", () => this.cancelAnalysisJobs());
     this.loadGroupOptions();
     const params = new URLSearchParams(location.search);
     const openPath = params.get("open");
@@ -204,6 +211,9 @@ const viewerApp = createApp({
     },
     // ---- 文件加载 ----
     pickFile() {
+      // 记录点击时刻：系统文件对话框这一段不经过任何接口，却是用户
+      // 感知“卡住”的主要区间（首次打开、杀毒软件扫描文件时尤其慢）。
+      this.dialogStartedAt = performance.now();
       this.$refs.fileInput.click();
     },
     onDropFile(event) {
@@ -218,8 +228,17 @@ const viewerApp = createApp({
     async loadFile(file) {
       this.error = "";
       this.status = "正在读取 " + file.name + " …";
+      // 从点击“打开分子”到对话框返回的耗时；此前完全没有任何计时覆盖。
+      if (this.dialogStartedAt) {
+        this.fileDialogMs = Math.round(performance.now() - this.dialogStartedAt);
+        this.dialogStartedAt = 0;
+      } else {
+        this.fileDialogMs = null;
+      }
       try {
+        const readStart = performance.now();
         const content = await file.text();
+        this.fileReadMs = Math.round(performance.now() - readStart);
         await this.requestLoad({ filename: file.name, content });
       } catch (err) {
         this.error = "读取文件失败：" + err.message;
@@ -428,9 +447,17 @@ const viewerApp = createApp({
         }
         const elapsedMs = Math.max(0, Math.round(performance.now() - startedAt));
         this.status = `已加载：${source}（${elapsedMs} ms）`;
+        // file_dialog_ms / file_read_ms 覆盖 fetch 之前的盲区：系统对话框
+        // 首次打开、杀毒软件扫描文件时，这一段比后端耗时更容易造成卡顿感。
+        const fileTiming = {};
+        if (this.fileDialogMs !== null) fileTiming.file_dialog_ms = this.fileDialogMs;
+        if (this.fileReadMs !== null) fileTiming.file_read_ms = this.fileReadMs;
+        this.fileDialogMs = null;
+        this.fileReadMs = null;
         console.info("分子加载耗时", {
           source,
           frontend_ms: elapsedMs,
+          ...fileTiming,
           ...(data.timing || {}),
         });
         this.$nextTick(() => this.fitView());
@@ -481,13 +508,29 @@ const viewerApp = createApp({
     wait(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     },
+    cancelAnalysisJobs() {
+      // 取消仍在跑的后台分析任务；sendBeacon 在页面卸载时仍能可靠发出请求
+      for (const jobId of this.analysisJobs.slice()) {
+        const url = `/api/analysis-jobs/${jobId}/cancel`;
+        if (navigator.sendBeacon) navigator.sendBeacon(url);
+        else fetch(url, { method: "POST" }).catch(() => {});
+      }
+    },
     async pollAnalysisJob(jobId, intervalMs, updateProgress) {
-      for (;;) {
-        const data = await this.getJson(`/api/analysis-jobs/${jobId}`);
-        if (data.status === "done") return data.result;
-        if (data.status === "failed") throw new Error(data.error || "分析失败");
-        if (updateProgress) updateProgress(data);
-        await this.wait(intervalMs || 250);
+      // 登记在跑的任务：页面卸载时据此通知后端取消，避免后台线程继续
+      // 占用 CPU，与后续“打开分子”之类的请求争抢 GIL。
+      if (!this.analysisJobs.includes(jobId)) this.analysisJobs.push(jobId);
+      try {
+        for (;;) {
+          const data = await this.getJson(`/api/analysis-jobs/${jobId}`);
+          if (data.status === "done") return data.result;
+          if (data.status === "failed") throw new Error(data.error || "分析失败");
+          if (data.status === "cancelled") throw new Error("分析已取消");
+          if (updateProgress) updateProgress(data);
+          await this.wait(intervalMs || 250);
+        }
+      } finally {
+        this.analysisJobs = this.analysisJobs.filter((id) => id !== jobId);
       }
     },
     async analyzeIsomers() {

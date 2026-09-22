@@ -123,6 +123,7 @@ _REAGENT_INPUTS: dict[str, tuple[tuple[str, ...], ...]] = {
     "卤代烃水解": ((), ("H2O",)),
     "酯水解": ((), ("H2O",)),
     "酯化反应": ((), ()),
+    "苯酚酯化": ((), ()),
 }
 
 
@@ -558,7 +559,7 @@ def _validate_retro(
 
 
 def _build_retro_templates() -> list[_RetroTemplate]:
-    """构建 19 条反合成模板（均以对应正向规则做验证）。"""
+    """构建 20 条反合成模板（均以对应正向规则做验证）。"""
     templates: list[_RetroTemplate] = []
 
     # 1. 烷烃 -> 烯烃（烯烃加氢的逆向）
@@ -1027,8 +1028,10 @@ def _build_retro_templates() -> list[_RetroTemplate]:
 
     templates.append(_RetroTemplate("醇→卤代烃", "卤代烃水解", gen_alcohol_to_haloalkane))
 
-    # 18. 酯 -> 羧酸 + 醇（酯化反应的逆向）
-    def gen_ester_to_acid_alcohol(m: oc.Molecule) -> list[list[oc.Molecule]]:
+    # 18/20. 酯 -> 羧酸 + 醇（或苯酚），按桥氧所连碳是否位于苯环上区分
+    def gen_ester_to_acid_oxygen(
+        m: oc.Molecule, phenol: bool
+    ) -> list[list[oc.Molecule]]:
         results: list[list[oc.Molecule]] = []
         for atom in m.atoms:
             if atom.name != "c" or not _is_carbonyl_carbon(atom):
@@ -1055,6 +1058,9 @@ def _build_retro_templates() -> list[_RetroTemplate]:
             ]
             if len(c_rest) != 1 or len(_neighbors(bridge)) != 2:
                 continue
+            # 桥氧连在苯环碳上属酚酯（苯酚酯化），否则属醇酯（酯化反应）
+            if _in_pi(c_rest[0]) != phenol:
+                continue
             working, atom_map = _copy_with_map(m)
             try:
                 oc.break_bond(atom_map[atom], atom_map[bridge])
@@ -1066,7 +1072,14 @@ def _build_retro_templates() -> list[_RetroTemplate]:
                 results.append(components)
         return results
 
-    templates.append(_RetroTemplate("酯→羧酸+醇", "酯化反应", gen_ester_to_acid_alcohol))
+    # 18. 酯 -> 羧酸 + 醇（酯化反应的逆向）
+    templates.append(
+        _RetroTemplate(
+            "酯→羧酸+醇",
+            "酯化反应",
+            lambda m: gen_ester_to_acid_oxygen(m, phenol=False),
+        )
+    )
 
     # 19. 卤代烃 -> 醇（醇卤代的逆向）
     def gen_haloalkane_to_alcohol(m: oc.Molecule) -> list[list[oc.Molecule]]:
@@ -1091,6 +1104,15 @@ def _build_retro_templates() -> list[_RetroTemplate]:
         return results
 
     templates.append(_RetroTemplate("卤代烃→醇", "醇卤代", gen_haloalkane_to_alcohol))
+
+    # 20. 酯 -> 羧酸 + 苯酚（苯酚酯化的逆向）
+    templates.append(
+        _RetroTemplate(
+            "酯→羧酸+酚",
+            "苯酚酯化",
+            lambda m: gen_ester_to_acid_oxygen(m, phenol=True),
+        )
+    )
 
     return templates
 
