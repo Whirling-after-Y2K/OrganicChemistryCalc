@@ -1198,6 +1198,19 @@ def _backward_layers(
 # ------- 汇合与路线重建 -------
 
 
+def _dedupe_products(molecules: Sequence[oc.Molecule]) -> tuple[oc.Molecule, ...]:
+    """产物按结构去重（保序）：计量数复制出的相同分子只保留一个。"""
+    seen: set[_Fp] = set()
+    unique: list[oc.Molecule] = []
+    for molecule in molecules:
+        key = _fp(molecule)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(molecule)
+    return tuple(unique)
+
+
 def _forward_to_step(step: _ForwardStep) -> SynthesisStep:
     return SynthesisStep(
         step_no=0,
@@ -1205,7 +1218,7 @@ def _forward_to_step(step: _ForwardStep) -> SynthesisStep:
         category=step.rule.category,
         conditions=step.rule.conditions,
         inputs=step.inputs,
-        outputs=tuple(step.outcome.products),
+        outputs=_dedupe_products(step.outcome.products),
     )
 
 
@@ -1216,7 +1229,7 @@ def _backward_to_step(step: _BackwardStep) -> SynthesisStep:
         category=step.rule.category,
         conditions=step.rule.conditions,
         inputs=step.inputs,
-        outputs=tuple(step.outcome.products),
+        outputs=_dedupe_products(step.outcome.products),
     )
 
 
