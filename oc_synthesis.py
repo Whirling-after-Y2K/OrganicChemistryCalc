@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from itertools import product
+from itertools import permutations, product
 from typing import Callable
 
 import oc_reactions as rx
@@ -539,22 +539,24 @@ def _validate_retro(
     choice_lists: list[tuple[str | None, ...]] = [
         tuple(keys) if keys else (None,) for keys in reagent_groups
     ]
-    for choices in product(*choice_lists):
-        inputs: list[oc.Molecule] = []
-        combo_index = 0
-        for index, keys in enumerate(reagent_groups):
-            if keys:
-                inputs.append(FREE_REAGENTS[choices[index]])
-            else:
-                inputs.append(reactants[combo_index])
-                combo_index += 1
-        try:
-            outcomes = rx.reaction_outcomes(inputs, reaction=rule.name)
-        except ValueError:
-            continue
-        for outcome in outcomes:
-            if any(product == target for product in outcome.products):
-                return outcome, tuple(inputs)
+    # 反合成模板只按连通分量产出反应物，不保证与规则 input_index 同序，故遍历排列
+    for permutation in permutations(reactants):
+        for choices in product(*choice_lists):
+            inputs: list[oc.Molecule] = []
+            combo_index = 0
+            for index, keys in enumerate(reagent_groups):
+                if keys:
+                    inputs.append(FREE_REAGENTS[choices[index]])
+                else:
+                    inputs.append(permutation[combo_index])
+                    combo_index += 1
+            try:
+                outcomes = rx.reaction_outcomes(inputs, reaction=rule.name)
+            except ValueError:
+                continue
+            for outcome in outcomes:
+                if any(product == target for product in outcome.products):
+                    return outcome, tuple(inputs)
     return None
 
 
