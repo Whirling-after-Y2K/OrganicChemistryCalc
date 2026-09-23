@@ -24,6 +24,10 @@ _MAX_RING_SIZE: int = 8         # 环检测上限（高中范围：3-8 元环）
 _SP2_ANGLE: float = math.radians(120.0)    # sp2 理想键角
 _SP3_ANGLE: float = math.radians(109.5)    # sp3 理想键角
 _SUBSCRIPTS: str = "₀₁₂₃₄₅₆₇₈₉"
+_SYSTEM_GAP: float = 2.0 * BOND_LEN      # 独立安放的环系统之间的水平间距
+_MIN_GAP: float = 1.05 * BOND_LEN        # 非键原子之间允许的最小间距
+_ROTATION_STEP: float = math.pi / 6.0    # 环系统安放时的候选方向步长（30°）
+_ROTATION_SPAN: int = 6                  # 候选方向向两侧展开的步数（合计 ±180°）
 
 
 # ------- 布局 -------
@@ -220,64 +224,65 @@ def _place_fused_ring(
     d2 = math.hypot(c2[0] - other_centroid[0], c2[1] - other_centroid[1])
     center = c1 if d1 >= d2 else c2
 
-    ia, ib = ring.index(atom_a), ring.index(atom_b)
-    step_dir = 1 if (ib - ia) % n == 1 else -1
+    # 顶点编号要同时对齐两个方向：角度方向由共享边 a->b 相对环心的转角决定，
+    # 环表方向则取决于 b 在环表里是紧跟 a 还是前接 a。只有两者取齐，
+    # 环上相邻的原子才会落到相邻顶点上，共有原子也才正好落回原位。
+    start = ring.index(atom_a)
     base_angle = math.atan2(pos_a[1] - center[1], pos_a[0] - center[0])
+    if ring[(start + 1) % n] is atom_b:
+        list_dir = 1
+    elif ring[(start - 1) % n] is atom_b:
+        list_dir = -1
+    else:  # 共享边两端在环表里不相邻（不应发生），退回整体正多边形
+        return _polygon(ring, center, base_angle)
+    other_angle = math.atan2(pos_b[1] - center[1], pos_b[0] - center[0])
+    turn = (other_angle - base_angle + math.pi) % (2.0 * math.pi) - math.pi
+    step_dir = 1 if turn >= 0.0 else -1
     result: dict[oc.Atom, tuple[float, float]] = {}
     for i in range(n):
-        idx = (ia + step_dir * i) % n
         angle = base_angle + step_dir * 2.0 * math.pi * i / n
-        result[ring[idx]] = (
+        atom = ring[(start + list_dir * i) % n]
+        result[atom] = (
             center[0] + radius * math.cos(angle),
             center[1] + radius * math.sin(angle),
         )
     return result
 
 
-def _place_ring_system(
-    system: list[list[oc.Atom]],
-    molecule: oc.Molecule,
-    positions: dict[oc.Atom, tuple[float, float]],
-    sub_offset: float,
-) -> tuple[dict[oc.Atom, tuple[float, float]], float]:
-    """放置一个稠环系统；返回新坐标与更新后的横向偏移。"""
+def _system_members(system: list[list[oc.Atom]]) -> set[oc.Atom]:
+    """环系统覆盖的全部原子。"""
+    return {atom for ring in system for atom in ring}
+
+
+def _first_ring(
+    system: list[list[oc.Atom]], molecule: oc.Molecule
+) -> list[oc.Atom]:
+    """系统内原子编号最小的环，作为生长起点（保证确定性）。"""
     atom_index: dict[oc.Atom, int] = {a: i for i, a in enumerate(molecule.atoms)}
-    local: dict[oc.Atom, tuple[float, float]] = {}
+    return min(system, key=lambda ring: min(atom_index[a] for a in ring))
 
-    # 已占用原子（与之前系统共享的螺环原子）
-    shared = [a for ring in system for a in ring if a in positions]
-    first_ring = min(system, key=lambda r: min(atom_index[a] for a in r))
 
-    if shared:
-        anchor = shared[0]
-        pos_anchor = positions[anchor]
-        global_centroid = _centroid(positions)
-        direction = math.atan2(
-            pos_anchor[1] - global_centroid[1],
-            pos_anchor[0] - global_centroid[0],
-        )
-        n = len(first_ring)
-        radius = BOND_LEN / (2.0 * math.sin(math.pi / n))
-        center = (
-            pos_anchor[0] + radius * math.cos(direction),
-            pos_anchor[1] + radius * math.sin(direction),
-        )
-        base_angle = math.atan2(pos_anchor[1] - center[1], pos_anchor[0] - center[0])
-        ia = first_ring.index(anchor)
-        for i, atom in enumerate(first_ring):
-            idx = (ia + i) % n
-            angle = base_angle + 2.0 * math.pi * i / n
-            local[first_ring[idx]] = (
-                center[0] + radius * math.cos(angle),
-                center[1] + radius * math.sin(angle),
-            )
-    else:
-        local.update(_polygon(first_ring, (sub_offset, 0.0), -math.pi / 2.0))
+def _shared_edge(
+    shared: set[oc.Atom], index: dict[oc.Atom, int]
+) -> tuple[oc.Atom, oc.Atom] | tuple[None, None]:
+    """把两个环的共有原子按分子编号排成共享边；不相邻时返回 (None, None)。"""
+    if len(shared) != 2:
+        return (None, None)
+    atom_a, atom_b = sorted(shared, key=lambda a: index[a])
+    if not _are_bonded(atom_a, atom_b):
+        return (None, None)
+    return (atom_a, atom_b)
 
-    placed: set[int] = set()
-    first_id = id(first_ring)
-    placed.add(first_id)
-    queue: deque[list[oc.Atom]] = deque([first_ring])
+
+def _grow_ring_system(
+    system: list[list[oc.Atom]],
+    seed_ring: list[oc.Atom],
+    local: dict[oc.Atom, tuple[float, float]],
+    index: dict[oc.Atom, int],
+) -> dict[oc.Atom, tuple[float, float]]:
+    """从 seed_ring 出发，按共享边把同一系统的其余环逐个接上。"""
+    placed: set[int] = {id(seed_ring)}
+    queue: deque[list[oc.Atom]] = deque([seed_ring])
     while queue:
         ring1 = queue.popleft()
         ring1_centroid = _centroid({a: local[a] for a in ring1 if a in local})
@@ -285,18 +290,156 @@ def _place_ring_system(
             if id(ring2) in placed:
                 continue
             shared_atoms = set(ring1) & set(ring2)
-            if len(shared_atoms) == 2:
-                a, b = tuple(shared_atoms)
-                if _are_bonded(a, b):
-                    fused = _place_fused_ring(
-                        ring2, a, b, local[a], local[b], ring1_centroid
-                    )
-                    local.update(fused)
-                    placed.add(id(ring2))
-                    queue.append(ring2)
+            if len(shared_atoms) != 2:
+                continue
+            atom_a, atom_b = _shared_edge(shared_atoms, index)
+            if atom_a is None:
+                continue  # 只共享两个不相邻原子的桥环暂不支持
+            local.update(
+                _place_fused_ring(
+                    ring2, atom_a, atom_b, local[atom_a], local[atom_b], ring1_centroid
+                )
+            )
+            placed.add(id(ring2))
+            queue.append(ring2)
+    return local
 
+
+def _attachment(
+    system: list[list[oc.Atom]],
+    molecule: oc.Molecule,
+    adj: dict[oc.Atom, list[oc.Atom]],
+    positions: dict[oc.Atom, tuple[float, float]],
+) -> tuple[oc.Atom, oc.Atom] | None:
+    """找出环系统与已放置结构的连接：返回 (外部原子, 系统内原子)。
+
+    螺环的共用原子、以及环与环之间直接成键的情况都在这里识别。
+    """
+    members = _system_members(system)
+    for atom in molecule.atoms:
+        if atom not in members:
+            continue
+        for neighbor in adj[atom]:
+            if neighbor in positions and neighbor not in members:
+                return neighbor, atom
+    return None
+
+
+def _outward_direction(
+    atom: oc.Atom,
+    adj: dict[oc.Atom, list[oc.Atom]],
+    positions: dict[oc.Atom, tuple[float, float]],
+) -> tuple[float, float]:
+    """从 atom 的已放置邻居指向外侧的单位方向（新结构的外延方向）。"""
+    x, y = positions[atom]
+    sx = 0.0
+    sy = 0.0
+    for neighbor in adj[atom]:
+        if neighbor not in positions:
+            continue
+        nx, ny = positions[neighbor]
+        sx += x - nx
+        sy += y - ny
+    norm = math.hypot(sx, sy)
+    if norm < 1e-9:
+        return (1.0, 0.0)
+    return (sx / norm, sy / norm)
+
+
+def _collision_score(
+    local: dict[oc.Atom, tuple[float, float]],
+    positions: dict[oc.Atom, tuple[float, float]],
+) -> float:
+    """候选布局与已放置原子的冲突程度（0 表示互不重叠）。"""
+    score = 0.0
+    for atom, (x, y) in local.items():
+        for other, (ox, oy) in positions.items():
+            if other in local or _are_bonded(atom, other):
+                continue
+            distance = math.hypot(x - ox, y - oy)
+            if distance < _MIN_GAP:
+                score += (_MIN_GAP - distance) ** 2
+    return score
+
+
+def _heading_candidates() -> list[float]:
+    """候选方向序列：先保持外延方向，再按 ±30° 逐步试探。"""
+    steps = [0]
+    for step in range(1, _ROTATION_SPAN + 1):
+        steps.extend([step, -step])
+    return [_ROTATION_STEP * step for step in steps]
+
+
+def _layout_system(
+    system: list[list[oc.Atom]],
+    molecule: oc.Molecule,
+    attach_atom: oc.Atom,
+    target: tuple[float, float],
+    heading: float,
+) -> dict[oc.Atom, tuple[float, float]]:
+    """把系统内的 attach_atom 放到 target，系统整体朝 heading 方向展开。"""
+    seed_ring = next((ring for ring in system if attach_atom in ring), None)
+    if seed_ring is None:
+        seed_ring = _first_ring(system, molecule)
+    ordered = list(seed_ring)
+    if attach_atom in ordered:
+        start = ordered.index(attach_atom)
+        ordered = ordered[start:] + ordered[:start]
+    n = len(ordered)
+    radius = BOND_LEN / (2.0 * math.sin(math.pi / n))
+    center = (
+        target[0] - radius * math.cos(heading),
+        target[1] - radius * math.sin(heading),
+    )
+    local: dict[oc.Atom, tuple[float, float]] = _polygon(ordered, center, heading)
+    index: dict[oc.Atom, int] = {a: i for i, a in enumerate(molecule.atoms)}
+    return _grow_ring_system(system, seed_ring, local, index)
+
+
+def _attach_system(
+    system: list[list[oc.Atom]],
+    molecule: oc.Molecule,
+    adj: dict[oc.Atom, list[oc.Atom]],
+    positions: dict[oc.Atom, tuple[float, float]],
+    anchor_atom: oc.Atom,
+    attach_atom: oc.Atom,
+) -> dict[oc.Atom, tuple[float, float]]:
+    """把环系统贴着已放置原子安放：枚举候选方向，取冲突最小的布局。"""
+    reference = attach_atom if attach_atom in positions else anchor_atom
+    base = _outward_direction(reference, adj, positions)
+    base_angle = math.atan2(base[1], base[0])
+    if attach_atom in positions:
+        target = positions[attach_atom]  # 螺环：共用原子保持原位
+    else:
+        ax, ay = positions[anchor_atom]
+        target = (ax + BOND_LEN * base[0], ay + BOND_LEN * base[1])
+
+    best: dict[oc.Atom, tuple[float, float]] = {}
+    best_score = math.inf
+    for turn in _heading_candidates():
+        local = _layout_system(system, molecule, attach_atom, target, base_angle + turn)
+        score = _collision_score(local, positions)
+        if score < best_score - 1e-9:
+            best, best_score = local, score
+        if score <= 0.0:
+            break
+    return best
+
+
+def _place_system_freestanding(
+    system: list[list[oc.Atom]],
+    molecule: oc.Molecule,
+    sub_offset: float,
+) -> tuple[dict[oc.Atom, tuple[float, float]], float]:
+    """独立安放一个环系统：整体平移到 sub_offset 右侧，返回坐标与新偏移。"""
+    first_ring = _first_ring(system, molecule)
+    seed = _polygon(first_ring, (0.0, 0.0), -math.pi / 2.0)
+    shift = sub_offset - min(x for x, _ in seed.values())
+    seed = {atom: (x + shift, y) for atom, (x, y) in seed.items()}
+    index: dict[oc.Atom, int] = {a: i for i, a in enumerate(molecule.atoms)}
+    local = _grow_ring_system(system, first_ring, seed, index)
     max_x = max(x for x, _ in local.values())
-    return local, max_x + 2.0 * BOND_LEN
+    return local, max(sub_offset, max_x + _SYSTEM_GAP)
 
 
 def _is_sp2(atom: oc.Atom) -> bool:
@@ -306,107 +449,105 @@ def _is_sp2(atom: oc.Atom) -> bool:
     return any(bond.order >= 2 for bond in atom.bonds)
 
 
-def _place_branches(
-    molecule: oc.Molecule,
+def _place_children(
+    parent: oc.Atom,
     adj: dict[oc.Atom, list[oc.Atom]],
     positions: dict[oc.Atom, tuple[float, float]],
+    place_angle: dict[oc.Atom, float],
     ring_centroid: dict[oc.Atom, tuple[float, float]],
-    component: set[oc.Atom] | None = None,
-) -> None:
-    """BFS 放置所有非环原子：环原子向外、链原子顺延、起点向下。"""
-    place_angle: dict[oc.Atom, float] = {}
-    queue: deque[oc.Atom] = deque()
-    for atom in molecule.atoms:
-        if atom in positions and (component is None or atom in component):
-            queue.append(atom)
-    while queue:
-        parent = queue.popleft()
-        children = [nb for nb in adj[parent] if nb not in positions]
-        if not children:
-            continue
-        if parent in ring_centroid:
-            cx, cy = ring_centroid[parent]
-            x, y = positions[parent]
-            base = math.atan2(y - cy, x - cx)
-        elif parent in place_angle:
-            base = place_angle[parent]
-        else:
-            base = math.pi / 2.0  # 向下
-        k = len(children)
-        step = _SP2_ANGLE if _is_sp2(parent) else _SP3_ANGLE
-        angles = [base + step * (i - (k - 1) / 2.0) for i in range(k)]
-        px, py = positions[parent]
-        for child, angle in zip(children, angles):
-            positions[child] = (
-                px + BOND_LEN * math.cos(angle),
-                py + BOND_LEN * math.sin(angle),
-            )
-            place_angle[child] = angle
-            queue.append(child)
+) -> list[oc.Atom]:
+    """把 parent 尚未定位的邻居按理想键角扇形展开，返回新放置的原子。
+
+    环原子沿半径向外、链原子顺延父键方向、链条起点朝下；
+    多个邻居关于基准角对称排开，避免全挤在一边。
+    """
+    children = [nb for nb in adj[parent] if nb not in positions]
+    if not children:
+        return []
+    if parent in ring_centroid:
+        cx, cy = ring_centroid[parent]
+        x, y = positions[parent]
+        base = math.atan2(y - cy, x - cx)
+    elif parent in place_angle:
+        base = place_angle[parent]
+    else:
+        base = math.pi / 2.0  # 链条起点向下
+    step = _SP2_ANGLE if _is_sp2(parent) else _SP3_ANGLE
+    px, py = positions[parent]
+    for i, child in enumerate(children):
+        angle = base + step * (i - (len(children) - 1) / 2.0)
+        positions[child] = (
+            px + BOND_LEN * math.cos(angle),
+            py + BOND_LEN * math.sin(angle),
+        )
+        place_angle[child] = angle
+    return children
 
 
 def _refine(
     molecule: oc.Molecule,
     positions: dict[oc.Atom, tuple[float, float]],
     ring_atoms: set[oc.Atom],
-    iterations: int = 100,
+    iterations: int = 300,
 ) -> None:
-    """对非环原子做少量弹簧+斥力微调（环原子冻结，确定性）。"""
+    """对非环原子做键长 + 间距投影松弛（环原子冻结，确定性）。
+
+    每一轮先把偏离的键长补回 BOND_LEN，再把间距不足的非键原子推开；
+    位移按可移动端均摊，环原子不动。没有明显冲突即提前收工，
+    因此本来就排得开的分子布局保持原样。
+    """
     free = [a for a in molecule.atoms if a not in ring_atoms]
     if not free:
         return
     atoms = molecule.atoms
-    step = 0.08
     for _ in range(iterations):
-        forces: dict[oc.Atom, tuple[float, float]] = {a: (0.0, 0.0) for a in free}
+        worst_gap = 0.0
         for bond in molecule.bonds:
-            a1, a2 = bond.atoms
-            f1 = a1 in forces
-            f2 = a2 in forces
-            if not f1 and not f2:
+            atom1, atom2 = bond.atoms
+            movable = [a for a in (atom1, atom2) if a not in ring_atoms]
+            if not movable:
                 continue
-            x1, y1 = positions[a1]
-            x2, y2 = positions[a2]
+            x1, y1 = positions[atom1]
+            x2, y2 = positions[atom2]
             dx, dy = x2 - x1, y2 - y1
-            d = math.hypot(dx, dy)
-            if d < 1e-6:
+            distance = math.hypot(dx, dy)
+            if distance < 1e-6:
                 continue
-            force = (d - BOND_LEN) * 0.05
-            ux, uy = dx / d, dy / d
-            if f1:
-                fx, fy = forces[a1]
-                forces[a1] = (fx + ux * force, fy + uy * force)
-            if f2:
-                fx, fy = forces[a2]
-                forces[a2] = (fx - ux * force, fy - uy * force)
+            correction = (distance - BOND_LEN) / (2.0 * len(movable))
+            ux, uy = dx / distance, dy / distance
+            for atom in movable:
+                sign = 1.0 if atom is atom1 else -1.0
+                x, y = positions[atom]
+                positions[atom] = (
+                    x + sign * ux * correction,
+                    y + sign * uy * correction,
+                )
         for i in range(len(atoms)):
             for j in range(i + 1, len(atoms)):
-                a1, a2 = atoms[i], atoms[j]
-                f1 = a1 in forces
-                f2 = a2 in forces
-                if not f1 and not f2:
+                atom1, atom2 = atoms[i], atoms[j]
+                if _are_bonded(atom1, atom2):
                     continue
-                x1, y1 = positions[a1]
-                x2, y2 = positions[a2]
+                movable = [a for a in (atom1, atom2) if a not in ring_atoms]
+                if not movable:
+                    continue
+                x1, y1 = positions[atom1]
+                x2, y2 = positions[atom2]
                 dx, dy = x2 - x1, y2 - y1
-                d = math.hypot(dx, dy)
-                min_d = BOND_LEN * 1.05
-                if d >= min_d or d < 1e-6:
+                distance = math.hypot(dx, dy)
+                if distance >= _MIN_GAP:
                     continue
-                push = (min_d - d) * 0.12
-                ux, uy = dx / d, dy / d
-                if f1:
-                    fx, fy = forces[a1]
-                    forces[a1] = (fx - ux * push, fy - uy * push)
-                if f2:
-                    fx, fy = forces[a2]
-                    forces[a2] = (fx + ux * push, fy + uy * push)
-        for atom in free:
-            fx, fy = forces[atom]
-            mx = max(-2.0, min(2.0, fx))
-            my = max(-2.0, min(2.0, fy))
-            x, y = positions[atom]
-            positions[atom] = (x + mx * step, y + my * step)
+                worst_gap = max(worst_gap, _MIN_GAP - distance)
+                if distance < 1e-6:
+                    ux, uy = 1.0, 0.0  # 完全重合时给一个确定方向
+                else:
+                    ux, uy = dx / distance, dy / distance
+                push = (_MIN_GAP - distance) / len(movable)
+                for atom in movable:
+                    sign = 1.0 if atom is atom1 else -1.0
+                    x, y = positions[atom]
+                    positions[atom] = (x + sign * ux * push, y + sign * uy * push)
+        if worst_gap <= 1e-3:
+            break
 
 
 def _normalize(
@@ -424,42 +565,86 @@ def _normalize(
 def compute_coordinates(
     molecule: oc.Molecule,
 ) -> dict[oc.Atom, tuple[float, float]]:
-    """确定性 2D 布局：环 -> 稠合/螺环 -> 支链 BFS -> 非环原子微调 -> 居中。"""
+    """确定性 2D 布局：以种子环系统为起点按连通顺序生长。
+
+    每个连通分量先安放编号最小的环系统（无环分量则安放编号最小的原子），
+    随后广度优先向外生长：遇到还没安放的环系统就整个接上——稠环、螺环、
+    环与环直接成键、以及环经链与环相连都在这一步处理；其余邻居按理想
+    键角扇形展开。最后做间距松弛并居中。
+    """
     adj = _adjacency(molecule)
+    index: dict[oc.Atom, int] = {a: i for i, a in enumerate(molecule.atoms)}
     components = _connected_components(molecule, adj)
     cycles = _find_simple_cycles(adj)
     rings = _select_rings(cycles)
     systems = _group_ring_systems(rings, molecule)
+    system_of: dict[oc.Atom, int] = {
+        atom: no
+        for no, system in enumerate(systems)
+        for atom in _system_members(system)
+    }
 
     positions: dict[oc.Atom, tuple[float, float]] = {}
     ring_centroid: dict[oc.Atom, tuple[float, float]] = {}
+    place_angle: dict[oc.Atom, float] = {}
+    placed: set[int] = set()
+    queue: deque[oc.Atom] = deque()
+
+    def install(
+        system_no: int, local: dict[oc.Atom, tuple[float, float]]
+    ) -> None:
+        """登记一个环系统：记下环心、并入全局坐标并推入队列。"""
+        centroid = _centroid(local)
+        for atom in local:
+            ring_centroid[atom] = centroid
+        positions.update(local)
+        for atom in local:
+            queue.append(atom)
+        placed.add(system_no)
+
     offset_x = 0.0
-
     for component in components:
-        comp_set = set(component)
-        comp_systems = [
-            sys for sys in systems if all(atom in comp_set for ring in sys for atom in ring)
-        ]
-        sub_offset = offset_x
-        placed_any = False
-        for system in comp_systems:
-            local, sub_offset = _place_ring_system(
-                system, molecule, positions, sub_offset
+        seeded = [a for a in component if a in system_of]
+        if seeded:
+            seed_atom = min(seeded, key=lambda a: index[a])
+            seed_no = system_of[seed_atom]
+            local, _ = _place_system_freestanding(
+                systems[seed_no], molecule, offset_x
             )
-            centroid = _centroid(local)
-            for atom in local:
-                ring_centroid[atom] = centroid
-            positions.update(local)
-            placed_any = True
-        if not placed_any:
-            positions[component[0]] = (sub_offset, 0.0)
-        _place_branches(
-            molecule, adj, positions, ring_centroid, component=comp_set
-        )
-        comp_positions = [positions[a] for a in component]
-        offset_x = max(x for x, _ in comp_positions) + 2.0 * BOND_LEN
+            install(seed_no, local)
+        else:
+            positions[component[0]] = (offset_x, 0.0)
+            queue.append(component[0])
 
-    _place_branches(molecule, adj, positions, ring_centroid)
+        while queue:
+            parent = queue.popleft()
+            # 环系统优先：邻居属于尚未安放系统时，先把整个系统接上
+            fresh: list[int] = []
+            for child in (nb for nb in adj[parent] if nb not in positions):
+                no = system_of.get(child)
+                if no is not None and no not in placed and no not in fresh:
+                    fresh.append(no)
+            for no in sorted(fresh):
+                link = _attachment(systems[no], molecule, adj, positions)
+                if link is None:
+                    continue  # 邻居本身已带一个已放置原子，不会到这里
+                anchor_atom, attach_atom = link
+                install(
+                    no,
+                    _attach_system(
+                        systems[no], molecule, adj, positions,
+                        anchor_atom, attach_atom,
+                    ),
+                )
+            for child in _place_children(
+                parent, adj, positions, place_angle, ring_centroid
+            ):
+                queue.append(child)
+
+        offset_x = (
+            max(x for x, _ in (positions[a] for a in component)) + _SYSTEM_GAP
+        )
+
     _refine(molecule, positions, set(ring_centroid))
     return _normalize(positions)
 
