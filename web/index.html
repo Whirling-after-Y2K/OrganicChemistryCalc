@@ -13,11 +13,13 @@
       <header class="toolbar">
         <div class="brand">有机分子查看器</div>
         <button class="primary" @click="pickFile">打开分子…</button>
+        <!-- 兜底：浏览器不支持 showOpenFilePicker 时才点击它，见 app.js supportsFilePicker -->
         <input
           ref="fileInput"
           type="file"
           accept=".mol"
           style="display: none"
+          multiple
           @change="onFileChosen"
         />
         <button
@@ -26,6 +28,7 @@
         >
           导入
         </button>
+        <!-- 同上：导入按钮在不支持系统文件选择器的浏览器里用这个兜底 -->
         <input
           ref="importInput"
           type="file"
@@ -364,10 +367,7 @@
                 <input type="checkbox" v-model="synthesisDedupeStrategy" />
                 <span>同思路去重</span>
               </label>
-              <label
-                class="check-row"
-                title="只保留总步数最少的路线"
-              >
+              <label class="check-row" title="只保留总步数最少的路线">
                 <input type="checkbox" v-model="synthesisOptimalOnly" />
                 <span>仅最短路线</span>
               </label>
@@ -448,7 +448,8 @@
         <div class="dialog">
           <h3>保存分子</h3>
           <p class="dialog-hint">
-            当前浏览器不支持系统保存对话框，请手动输入保存路径；仅支持 .mol 后缀，未写后缀时自动补 .mol。
+            当前浏览器不支持系统保存对话框，请手动输入保存路径；仅支持 .mol
+            后缀，未写后缀时自动补 .mol。
           </p>
           <input
             type="text"

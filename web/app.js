@@ -210,44 +210,138 @@ const viewerApp = createApp({
       }
     },
     // ---- 文件加载 ----
+    // 系统文件选择器优先走 File System Access API（showOpenFilePicker）：
+    // 对话框跟随用户手势打开，选中后直接拿到 FileHandle，不必借道隐藏的
+    // <input type="file">。浏览器不提供该 API（旧版 Firefox、非安全上下文）
+    // 时才退回隐藏 input。
+    supportsFilePicker() {
+      return typeof window.showOpenFilePicker === "function";
+    },
+    pickerOptions(multiple) {
+      return {
+        multiple,
+        types: [
+          {
+            description: "分子构建脚本（" + MOLECULE_SUFFIX + "）",
+            accept: { "text/plain": [MOLECULE_SUFFIX] },
+          },
+        ],
+      };
+    },
+    // File System Access API 用 AbortError 表示用户取消，对应 <input> 的
+    // “不触发 change”，两种情况都不算失败
+    pickerCancelled(err) {
+      return Boolean(err) && err.name === "AbortError";
+    },
+    // showOpenFilePicker 的返回值随 multiple 在单个 handle 与数组之间切换，
+    // 统一转成 File[]，下游加载 / 导入逻辑不必分辨来源
+    async pickFilesViaApi(multiple) {
+      const handles = await window.showOpenFilePicker(this.pickerOptions(multiple));
+      const picked = Array.isArray(handles) ? handles : [handles];
+      const files = [];
+      for (const handle of picked) {
+        if (!handle || typeof handle.getFile !== "function") continue;
+        files.push(await handle.getFile());
+      }
+      return files;
+    },
     pickFile() {
       // 记录点击时刻：系统文件对话框这一段不经过任何接口，却是用户
       // 感知“卡住”的主要区间（首次打开、杀毒软件扫描文件时尤其慢）。
       this.dialogStartedAt = performance.now();
+      if (this.supportsFilePicker()) {
+        this.loadPickedFiles(true);
+        return;
+      }
       this.$refs.fileInput.click();
     },
+    async loadPickedFiles(multiple) {
+      let files = [];
+      try {
+        files = await this.pickFilesViaApi(multiple);
+      } catch (err) {
+        // 取消或失败都要清掉计时起点，否则失败后的一次拖拽加载会把
+        // 这段对话框等待算进 file_dialog_ms
+        this.dialogStartedAt = 0;
+        if (!this.pickerCancelled(err)) {
+          this.error = "打开文件失败：" + (err && err.message ? err.message : err);
+        }
+        this.status = this.pickerCancelled(err) ? "已取消打开" : "";
+        return;
+      }
+      await this.loadFiles(files);
+    },
     onDropFile(event) {
-      const file = event.dataTransfer.files && event.dataTransfer.files[0];
-      if (file) this.loadFile(file);
+      this.loadFiles(event.dataTransfer.files);
     },
     onFileChosen(event) {
-      const file = event.target.files && event.target.files[0];
+      this.loadFiles(event.target.files);
       event.target.value = "";
-      if (file) this.loadFile(file);
     },
-    async loadFile(file) {
+    // 文件选择器与拖拽都可以一次给出多个文件：串行加载，避免状态栏、
+    // fitView 与错误提示在多文件之间互相覆盖；单个文件失败不影响其余文件。
+    async loadFiles(fileList) {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+      // 系统文件对话框的耗时只记一次：一次选择可能带回多个文件
+      const dialogMs = this.dialogStartedAt
+        ? Math.round(performance.now() - this.dialogStartedAt)
+        : null;
+      this.dialogStartedAt = 0;
+      const failures = [];
+      for (const file of files) {
+        const ok = await this.loadFile(file, dialogMs);
+        if (!ok) failures.push(file.name);
+      }
+      if (files.length > 1) {
+        const loaded = files.length - failures.length;
+        this.error = failures.length
+          ? "以下文件加载失败：" + failures.join("、")
+          : "";
+        this.status = failures.length
+          ? `已加载 ${loaded} 个分子，${failures.length} 个失败`
+          : `已加载 ${loaded} 个分子`;
+      }
+    },
+    async loadFile(file, dialogMs = null) {
       this.error = "";
       this.status = "正在读取 " + file.name + " …";
       // 从点击“打开分子”到对话框返回的耗时；此前完全没有任何计时覆盖。
-      if (this.dialogStartedAt) {
-        this.fileDialogMs = Math.round(performance.now() - this.dialogStartedAt);
-        this.dialogStartedAt = 0;
-      } else {
-        this.fileDialogMs = null;
-      }
+      // 一次选择可能带回多个文件，耗时由 loadFiles 统一计算后传入。
+      this.fileDialogMs = dialogMs;
       try {
         const readStart = performance.now();
         const content = await file.text();
         this.fileReadMs = Math.round(performance.now() - readStart);
         await this.requestLoad({ filename: file.name, content });
+        return true;
       } catch (err) {
         this.error = "读取文件失败：" + err.message;
         this.status = "";
+        return false;
       }
     },
     // ---- 导入到当前标签页 ----
     pickImportFile() {
+      if (this.supportsFilePicker()) {
+        this.loadPickedImportFile();
+        return;
+      }
       this.$refs.importInput.click();
+    },
+    async loadPickedImportFile() {
+      let file = null;
+      try {
+        const files = await this.pickFilesViaApi(false);
+        file = files.length ? files[0] : null;
+      } catch (err) {
+        if (!this.pickerCancelled(err)) {
+          this.error = "打开文件失败：" + (err && err.message ? err.message : err);
+          this.status = "";
+        }
+        return;
+      }
+      if (file) this.importFile(file);
     },
     onImportFileChosen(event) {
       const file = event.target.files && event.target.files[0];
@@ -395,7 +489,7 @@ const viewerApp = createApp({
         this.activeTabId = existing.id;
         this.status = "已激活：" + existing.source;
         this.$nextTick(() => this.fitView());
-        return;
+        return existing;
       }
 
       const pending = this.loadRequests[descriptor.key];
@@ -461,9 +555,11 @@ const viewerApp = createApp({
           ...(data.timing || {}),
         });
         this.$nextTick(() => this.fitView());
+        return tab;
       } catch (err) {
         this.error = "请求失败：" + err.message;
         this.status = "";
+        return null;
       }
     },
 
