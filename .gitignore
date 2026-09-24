@@ -11,4 +11,4 @@ test_render.py
 test_*
 _oc_*.py
 diag_*.py
-*.md
+同分异构体真题测试报告.md
