@@ -28,6 +28,9 @@ _SYSTEM_GAP: float = 2.0 * BOND_LEN      # 独立安放的环系统之间的水�
 _MIN_GAP: float = 1.05 * BOND_LEN        # 非键原子之间允许的最小间距
 _ROTATION_STEP: float = math.pi / 6.0    # 环系统安放时的候选方向步长（30°）
 _ROTATION_SPAN: int = 6                  # 候选方向向两侧展开的步数（合计 ±180°）
+_RELAX: float = 0.5                    # 欠松弛系数：抑制键长修正与间距斥力相互较劲
+_CONVERGED_TOL: float = 1e-3           # 违约总量收敛阈值
+_STALL_LIMIT: int = 20                 # 违约不再下降时提前收工的轮数
 
 
 # ------- 布局 -------
@@ -484,6 +487,31 @@ def _place_children(
     return children
 
 
+def _violation(
+    molecule: oc.Molecule,
+    positions: dict[oc.Atom, tuple[float, float]],
+) -> float:
+    """布局违约总量：键长偏差平方和 + 非键间距不足平方和（用于比较快照优劣）。"""
+    total = 0.0
+    for bond in molecule.bonds:
+        atom1, atom2 = bond.atoms
+        x1, y1 = positions[atom1]
+        x2, y2 = positions[atom2]
+        total += (math.hypot(x2 - x1, y2 - y1) - BOND_LEN) ** 2
+    atoms = molecule.atoms
+    for i in range(len(atoms)):
+        for j in range(i + 1, len(atoms)):
+            atom1, atom2 = atoms[i], atoms[j]
+            if _are_bonded(atom1, atom2):
+                continue
+            x1, y1 = positions[atom1]
+            x2, y2 = positions[atom2]
+            distance = math.hypot(x2 - x1, y2 - y1)
+            if distance < _MIN_GAP:
+                total += (_MIN_GAP - distance) ** 2
+    return total
+
+
 def _refine(
     molecule: oc.Molecule,
     positions: dict[oc.Atom, tuple[float, float]],
@@ -492,16 +520,20 @@ def _refine(
 ) -> None:
     """对非环原子做键长 + 间距投影松弛（环原子冻结，确定性）。
 
-    每一轮先把偏离的键长补回 BOND_LEN，再把间距不足的非键原子推开；
-    位移按可移动端均摊，环原子不动。没有明显冲突即提前收工，
-    因此本来就排得开的分子布局保持原样。
+    修正量按可移动端均摊，并乘以欠松弛系数：键长回位与间距斥力量级相当，
+    全额施加只会相互较劲、越迭代越乱，欠松弛才能收敛。每轮记录违约最小的
+    快照，收尾一律回滚到它，所以这一步只会把布局改好，绝不会比原布局更差。
     """
     free = [a for a in molecule.atoms if a not in ring_atoms]
     if not free:
         return
     atoms = molecule.atoms
+    best_cost = _violation(molecule, positions)
+    if best_cost <= _CONVERGED_TOL:
+        return  # 本来就排得开，保持原样
+    best_positions: dict[oc.Atom, tuple[float, float]] = dict(positions)
+    stall = 0
     for _ in range(iterations):
-        worst_gap = 0.0
         for bond in molecule.bonds:
             atom1, atom2 = bond.atoms
             movable = [a for a in (atom1, atom2) if a not in ring_atoms]
@@ -513,7 +545,7 @@ def _refine(
             distance = math.hypot(dx, dy)
             if distance < 1e-6:
                 continue
-            correction = (distance - BOND_LEN) / (2.0 * len(movable))
+            correction = _RELAX * (distance - BOND_LEN) / len(movable)
             ux, uy = dx / distance, dy / distance
             for atom in movable:
                 sign = 1.0 if atom is atom1 else -1.0
@@ -536,18 +568,28 @@ def _refine(
                 distance = math.hypot(dx, dy)
                 if distance >= _MIN_GAP:
                     continue
-                worst_gap = max(worst_gap, _MIN_GAP - distance)
                 if distance < 1e-6:
                     ux, uy = 1.0, 0.0  # 完全重合时给一个确定方向
                 else:
                     ux, uy = dx / distance, dy / distance
-                push = (_MIN_GAP - distance) / len(movable)
+                push = _RELAX * (_MIN_GAP - distance) / len(movable)
                 for atom in movable:
                     sign = 1.0 if atom is atom1 else -1.0
                     x, y = positions[atom]
                     positions[atom] = (x + sign * ux * push, y + sign * uy * push)
-        if worst_gap <= 1e-3:
-            break
+        cost = _violation(molecule, positions)
+        if cost < best_cost - 1e-9:
+            best_cost = cost
+            best_positions = dict(positions)
+            stall = 0
+            if best_cost <= _CONVERGED_TOL:
+                break
+        else:
+            stall += 1
+            if stall >= _STALL_LIMIT:
+                break
+    positions.clear()
+    positions.update(best_positions)
 
 
 def _normalize(
@@ -641,9 +683,14 @@ def compute_coordinates(
             ):
                 queue.append(child)
 
-        offset_x = (
-            max(x for x, _ in (positions[a] for a in component)) + _SYSTEM_GAP
-        )
+        # 分量整体右移到光标处：扇形展开会让分量越过光标向左探出，
+        # 于是边界盒之间只剩窄缝，两个导入进来的片段就贴上来了。
+        shift = offset_x - min(positions[a][0] for a in component)
+        if abs(shift) > 1e-9:
+            for a in component:
+                x, y = positions[a]
+                positions[a] = (x + shift, y)
+        offset_x = max(positions[a][0] for a in component) + _SYSTEM_GAP
 
     _refine(molecule, positions, set(ring_centroid))
     return _normalize(positions)

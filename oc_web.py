@@ -1,7 +1,7 @@
 """本地 Web 分子查看器服务（Flask，仅绑定 127.0.0.1）。
 
 用法：
-    python oc_web.py                 # 启动服务并打开浏览器
+    python oc_web.py                 # 启动服务并打开浏览器（固定端口 1891）
     python oc_web.py <分子文件路径>   # 启动后自动加载该文件
     python oc_web.py <端口> <文件>
 
@@ -53,6 +53,8 @@ import organic_chemistry as oc
 
 app = Flask(__name__, static_folder="web", static_url_path="")
 app.json.ensure_ascii = False  # type: ignore # 保留中文，便于调试与阅读
+# 固定服务端口：未显式指定端口时始终使用 1891，地址可预期、便于收藏
+DEFAULT_PORT: int = 1891
 
 # 编辑会话：session_id -> {"molecule": Molecule, "source": str}（仅存内存）
 _SESSIONS: dict[str, dict[str, Any]] = {}
@@ -1091,12 +1093,24 @@ def start_synthesis_job() -> Any:
         return jsonify({"ok": False, "error": f"提交合成规划失败：{exc}"}), 400
 
 
-def _find_free_port() -> int:
+def _check_port(port: int) -> str:
+    """启动前探测端口：返回 "free"（空闲）/ "viewer"（本查看器已在运行）/ "busy"（被其他程序占用）。"""
+    import json
     import socket
+    from urllib.request import urlopen
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+        sock.settimeout(0.5)
+        if sock.connect_ex(("127.0.0.1", port)) != 0:
+            return "free"
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.0) as response:
+            payload: Any = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return "busy"
+    if isinstance(payload, dict) and payload.get("service") == "oc_web":
+        return "viewer"
+    return "busy"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1111,13 +1125,26 @@ def main(argv: list[str] | None = None) -> None:
         else:
             initial_file = arg
     if port == 0:
-        port = _find_free_port()
+        port = DEFAULT_PORT
 
     open_url = f"http://127.0.0.1:{port}/"
-    print("有机分子查看器已启动，请在浏览器中打开：")
-    print(open_url)
     if initial_file:
         open_url += "?open=" + quote(initial_file)
+
+    # 启动前探测固定端口：Windows 上 Flask 开发服务器带 SO_REUSEADDR，
+    # 同端口会被二次绑定成两个服务抢连接，必须先挡掉
+    port_status = _check_port(port)
+    if port_status == "viewer":
+        print("查看器已在运行，直接打开已有窗口。")
+        if "--no-browser" not in args:
+            webbrowser.open(open_url)
+        return
+    if port_status == "busy":
+        print(f"端口 {port} 已被其他程序占用，请先关闭它，或改用其他端口：python oc_web.py <端口>")
+        sys.exit(1)
+
+    print("有机分子查看器已启动，请在浏览器中打开：")
+    print(open_url)
 
     if "--no-browser" not in args:
         threading.Timer(0.5, lambda: webbrowser.open(open_url)).start()
@@ -1125,6 +1152,11 @@ def main(argv: list[str] | None = None) -> None:
         app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
     except KeyboardInterrupt:
         print("\n已停止。")
+    except OSError as exc:
+        # 端口被占用时给出明确提示，避免只看到一串 traceback
+        print(f"端口 {port} 启动失败：{exc}")
+        print("请确认没有其他程序占用该端口，或改用其他端口：python oc_web.py <端口>")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
